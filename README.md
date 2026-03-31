@@ -29,6 +29,20 @@ The compose file builds `sandboxed.sh` locally from `./sandboxed.sh`, so the sta
 
 Open `http://localhost:3333` for the dashboard.
 
+## Recovery (401 / GLIBC / network)
+
+If the stack is in a partial failure state (e.g. workers getting `401`, or `phantom-relay` crashing with a `GLIBC_*` error), do a clean rebuild:
+
+```bash
+./scripts/nuke-and-rebuild.sh --yes
+```
+
+If you only need to fix a desynced/expired worker service token (without changing your secret), regenerate `SANDBOXED_JWT` from `SANDBOXED_JWT_SECRET`:
+
+```bash
+./scripts/regen-service-jwt.sh
+```
+
 ## ⚙️ Configuration
 
 For detailed post-deployment setup, including **OpenCode** architecture, Slack/Telegram integration, and Memory Tier (Qdrant/Ollama) configuration, see the:

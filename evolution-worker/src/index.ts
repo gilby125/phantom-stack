@@ -6,7 +6,20 @@ import { EvolutionConfigSchema, type EvolutionConfig } from './evolution/config.
 import type { SessionSummary } from './evolution/types.js';
 import { GitLibrary } from './git/repo.js';
 
-const SANDBOXED_URL = (process.env.SANDBOXED_URL || 'http://localhost:3000').replace(/\/$/, '');
+function normalizeSandboxedUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/$/, '');
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname === 'sandboxed' && url.port === '3000') {
+      return url.origin;
+    }
+  } catch {
+    // Keep original (a later request will error with a clearer message).
+  }
+  return trimmed;
+}
+
+const SANDBOXED_URL = normalizeSandboxedUrl(process.env.SANDBOXED_URL || 'http://localhost:3000');
 const SANDBOXED_JWT = process.env.SANDBOXED_JWT || 'dev';
 const LIBRARY_REPO = process.env.LIBRARY_REPO_URL;
 

@@ -297,7 +297,8 @@ pub async fn require_auth(
     let token = auth_header
         .strip_prefix("Bearer ")
         .or_else(|| auth_header.strip_prefix("bearer "))
-        .unwrap_or("");
+        .unwrap_or("")
+        .trim();
 
     if token.is_empty() {
         return (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response();

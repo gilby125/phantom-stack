@@ -3,9 +3,22 @@ import { ThreadMap } from './bridge/thread-map.js';
 import { RelayBridge } from './bridge/relay.js';
 import { startSlack } from './channels/slack-adapter.js';
 
+function normalizeSandboxedUrl(raw: string): string {
+  const trimmed = raw.trim().replace(/\/$/, '');
+  try {
+    const url = new URL(trimmed);
+    if (url.hostname === 'sandboxed' && url.port === '3000') {
+      return url.origin;
+    }
+  } catch {
+    // Keep original (a later request will error with a clearer message).
+  }
+  return trimmed;
+}
+
 async function main() {
   const client = new SandboxedClient(
-    process.env.SANDBOXED_URL || 'http://localhost:3000',
+    normalizeSandboxedUrl(process.env.SANDBOXED_URL || 'http://localhost:3000'),
     process.env.SANDBOXED_JWT || 'dev'
   );
 

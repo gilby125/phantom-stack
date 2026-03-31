@@ -403,8 +403,12 @@ impl Config {
             .collect::<Vec<_>>();
 
         let auth = AuthConfig {
-            dashboard_password: std::env::var("DASHBOARD_PASSWORD").ok(),
-            jwt_secret: std::env::var("JWT_SECRET").ok(),
+            dashboard_password: std::env::var("DASHBOARD_PASSWORD")
+                .ok()
+                .and_then(|v| (!v.trim().is_empty()).then_some(v)),
+            jwt_secret: std::env::var("JWT_SECRET")
+                .ok()
+                .and_then(|v| (!v.trim().is_empty()).then_some(v)),
             jwt_ttl_days: std::env::var("JWT_TTL_DAYS")
                 .ok()
                 .map(|v| {

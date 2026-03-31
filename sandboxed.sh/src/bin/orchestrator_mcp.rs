@@ -1654,6 +1654,7 @@ async fn main() {
             // Mint a service JWT from the shared secret when no explicit token is set.
             std::env::var("JWT_SECRET")
                 .ok()
+                .filter(|s| !s.trim().is_empty())
                 .and_then(|s| mint_service_jwt(&s))
         });
 
