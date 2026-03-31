@@ -113,7 +113,16 @@ function createEngine(libraryPath: string): EvolutionEngine {
 
 function listenForMissions(): void {
   const headers = { Authorization: `Bearer ${SANDBOXED_JWT}` };
-  const es = new EventSource(`${SANDBOXED_URL}/api/control/stream`, { headers } as any);
+  const es = new EventSource(`${SANDBOXED_URL}/api/control/stream`, {
+    fetch: (input, init) =>
+      fetch(input, {
+        ...init,
+        headers: {
+          ...(init?.headers ?? {}),
+          ...headers,
+        },
+      }),
+  });
 
   es.addEventListener('status', async (e: any) => {
     try {
