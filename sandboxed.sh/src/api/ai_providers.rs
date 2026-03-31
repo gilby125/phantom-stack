@@ -6899,8 +6899,8 @@ pub async fn refresh_oauth_token_internal(
                 .form(&[
                     ("grant_type", "refresh_token"),
                     ("refresh_token", refresh_token),
-                    ("client_id", GOOGLE_CLIENT_ID),
-                    ("client_secret", GOOGLE_CLIENT_SECRET),
+                    ("client_id", &google_client_id()),
+                    ("client_secret", &google_client_secret()),
                 ])
                 .send()
                 .await
