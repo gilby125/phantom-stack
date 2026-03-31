@@ -1,8 +1,8 @@
 FROM node:20-bookworm-slim
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-
+WORKDIR /app
+RUN apt-get update && apt-get install -y python3 make g++ git && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev --build-from-source
 COPY src/ ./src/
 COPY tsconfig.json ./
 ENV SANDBOXED_URL=http://sandboxed:3000
