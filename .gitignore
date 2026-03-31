@@ -1,0 +1,7 @@
+.env
+.env.*
+!.env.template
+**/node_modules/
+**/*.log
+**/.DS_Store
+phantom-relay/thread-map.sqlite
