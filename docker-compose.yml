@@ -24,6 +24,12 @@ services:
       - LIBRARY_REMOTE=${LIBRARY_REPO_URL}
     volumes:
       - sandboxed_data:/root/.sandboxed-sh
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 35s
     networks:
       - sandboxed-net
     restart: unless-stopped
@@ -39,7 +45,8 @@ services:
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
     depends_on:
-      - sandboxed
+      sandboxed:
+        condition: service_healthy
     networks:
       - sandboxed-net
     restart: unless-stopped
@@ -55,7 +62,8 @@ services:
       - EVOLUTION_USE_LLM_JUDGES=${EVOLUTION_USE_LLM_JUDGES}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
-      - sandboxed
+      sandboxed:
+        condition: service_healthy
     networks:
       - sandboxed-net
     restart: unless-stopped

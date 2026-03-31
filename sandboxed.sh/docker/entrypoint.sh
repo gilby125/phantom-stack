@@ -67,13 +67,16 @@ BACKEND_PID=$!
 
 # Wait for backend to become healthy before starting dashboard/Caddy
 echo "[entrypoint] waiting for backend health..."
-for i in $(seq 1 30); do
+for i in $(seq 1 60); do
     if curl -sf http://127.0.0.1:${PORT:-3000}/api/health >/dev/null 2>&1; then
         echo "[entrypoint] backend ready"
         break
     fi
-    if [ "$i" -eq 30 ]; then
-        echo "[entrypoint] WARNING: backend not healthy after 15s, continuing anyway"
+    if [ "$i" -eq 60 ]; then
+        echo "[entrypoint] ERROR: backend not healthy after 30s, exiting"
+        kill "$BACKEND_PID" 2>/dev/null || true
+        wait "$BACKEND_PID" 2>/dev/null || true
+        exit 1
     fi
     sleep 0.5
 done
