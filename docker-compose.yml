@@ -9,7 +9,7 @@ volumes:
 
 services:
   sandboxed:
-    image: ghcr.io/th0rgal/sandboxed.sh:latest
+    build: ./sandboxed.sh
     container_name: sandboxed
     privileged: true
     cgroup: host

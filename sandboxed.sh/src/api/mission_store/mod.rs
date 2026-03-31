@@ -1,0 +1,812 @@
+//! Mission storage module with pluggable backends.
+//!
+//! Supports:
+//! - `memory`: In-memory storage (non-persistent, for testing)
+//! - `file`: JSON file-based storage (legacy)
+//! - `sqlite`: SQLite database with full event logging
+
+mod file;
+mod memory;
+mod sqlite;
+
+pub use file::FileMissionStore;
+pub use memory::InMemoryMissionStore;
+pub use sqlite::SqliteMissionStore;
+
+use crate::api::control::{AgentEvent, AgentTreeNode, DesktopSessionInfo, MissionStatus};
+use async_trait::async_trait;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use uuid::Uuid;
+
+/// A mission (persistent goal-oriented session).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mission {
+    pub id: Uuid,
+    pub status: MissionStatus,
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub short_description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_updated_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata_version: Option<String>,
+    /// Workspace ID where this mission runs (defaults to host workspace)
+    #[serde(default = "default_workspace_id")]
+    pub workspace_id: Uuid,
+    /// Workspace name (resolved from workspace_id for display)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_name: Option<String>,
+    /// Agent name from library (e.g., "code-reviewer")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// Optional model override (provider/model)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    /// Optional model effort override (e.g. low/medium/high)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_effort: Option<String>,
+    /// Backend to use for this mission ("opencode" or "claudecode")
+    #[serde(default = "default_backend")]
+    pub backend: String,
+    /// Config profile to use for this mission (from library configs)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config_profile: Option<String>,
+    pub history: Vec<MissionHistoryEntry>,
+    pub created_at: String,
+    pub updated_at: String,
+    /// When this mission was interrupted (if status is Interrupted)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interrupted_at: Option<String>,
+    /// Whether this mission can be resumed
+    #[serde(default)]
+    pub resumable: bool,
+    /// Desktop sessions started during this mission (used for reconnect/stream resume)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop_sessions: Vec<DesktopSessionInfo>,
+    /// Session ID for conversation persistence (used by Claude Code --session-id)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// Why the mission terminated (for failed/completed missions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_reason: Option<String>,
+    /// Parent mission ID (for orchestrated worker missions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_mission_id: Option<Uuid>,
+    /// Working directory override (for git worktrees etc.)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
+}
+
+fn default_backend() -> String {
+    "claudecode".to_string()
+}
+
+fn default_workspace_id() -> Uuid {
+    crate::workspace::DEFAULT_WORKSPACE_ID
+}
+
+/// A single entry in the mission history.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MissionHistoryEntry {
+    pub role: String,
+    pub content: String,
+}
+
+/// A stored event with full metadata (for event replay/debugging).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StoredEvent {
+    pub id: i64,
+    pub mission_id: Uuid,
+    pub sequence: i64,
+    pub event_type: String,
+    pub timestamp: String,
+    pub event_id: Option<String>,
+    pub tool_call_id: Option<String>,
+    pub tool_name: Option<String>,
+    pub content: String,
+    pub metadata: serde_json::Value,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Automation Types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Source of the command to execute in an automation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CommandSource {
+    /// Command from the library (by name)
+    Library { name: String },
+    /// Command from a local file (relative to mission workspace)
+    LocalFile { path: String },
+    /// Inline command content
+    Inline { content: String },
+}
+
+/// Webhook configuration for webhook-triggered automations.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WebhookConfig {
+    /// Unique webhook ID (part of the webhook URL path)
+    pub webhook_id: String,
+    /// Optional secret token for HMAC validation
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+    /// Variable mappings from webhook payload to command variables
+    /// Example: {"repo": "webhook.repository.name", "commit": "webhook.head_commit.id"}
+    #[serde(default)]
+    pub variable_mappings: HashMap<String, String>,
+}
+
+/// Trigger type for an automation.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum TriggerType {
+    /// Fixed interval in seconds
+    Interval { seconds: u64 },
+    /// Webhook trigger
+    Webhook { config: WebhookConfig },
+    /// Trigger immediately after an agent turn finishes for the mission
+    AgentFinished,
+}
+
+/// Stop policy for automation lifecycle.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum StopPolicy {
+    /// Never auto-disable this automation.
+    Never,
+    /// Auto-disable after N consecutive failures.
+    WhenFailingConsecutively {
+        /// Number of consecutive failures before stopping (default: 2)
+        #[serde(default = "default_failure_count")]
+        count: u32,
+    },
+    /// Auto-disable when all issues are closed and all PRs are merged in a GitHub repo.
+    WhenAllIssuesClosedAndPRsMerged {
+        /// GitHub repository in "owner/repo" format
+        repo: String,
+    },
+}
+
+/// Whether to start a fresh session for each automation trigger.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FreshSession {
+    /// Always start a fresh session (clear context/history).
+    Always,
+    /// Route completion-triggered automation to another session.
+    /// Requires custom variable `nextSessionId` set to a mission UUID.
+    Switch,
+    /// Keep session alive (default behavior).
+    #[default]
+    Keep,
+}
+
+fn default_stop_policy() -> StopPolicy {
+    StopPolicy::WhenFailingConsecutively {
+        count: default_failure_count(),
+    }
+}
+
+fn default_failure_count() -> u32 {
+    2
+}
+
+/// Retry configuration for automation execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RetryConfig {
+    /// Maximum number of retry attempts
+    pub max_retries: u32,
+    /// Initial delay in seconds between retries
+    pub retry_delay_seconds: u64,
+    /// Backoff multiplier for exponential backoff (1.0 = no backoff)
+    #[serde(default = "default_backoff_multiplier")]
+    pub backoff_multiplier: f64,
+}
+
+fn default_backoff_multiplier() -> f64 {
+    2.0
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            retry_delay_seconds: 60,
+            backoff_multiplier: 2.0,
+        }
+    }
+}
+
+/// An automation that triggers commands based on various triggers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Automation {
+    pub id: Uuid,
+    pub mission_id: Uuid,
+    /// Source of the command to execute
+    pub command_source: CommandSource,
+    /// Trigger configuration
+    pub trigger: TriggerType,
+    /// Variable substitutions to apply to the command
+    /// Example: {"timestamp": "<timestamp/>", "mission_name": "<mission_name/>"}
+    #[serde(default)]
+    pub variables: HashMap<String, String>,
+    /// Whether this automation is currently active
+    pub active: bool,
+    /// When this automation was created
+    pub created_at: String,
+    /// When this automation was last triggered (for interval-based automations)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_triggered_at: Option<String>,
+    /// Retry configuration
+    #[serde(default)]
+    pub retry_config: RetryConfig,
+    /// Auto-stop behavior when mission reaches terminal state.
+    #[serde(default = "default_stop_policy")]
+    pub stop_policy: StopPolicy,
+    /// Whether to start a fresh session for each trigger (clears context/history).
+    #[serde(default)]
+    pub fresh_session: FreshSession,
+    /// Number of consecutive failures (used for WhenFailingConsecutively policy).
+    /// This is tracked internally and not persisted directly.
+    #[serde(default, skip_serializing)]
+    pub consecutive_failures: u32,
+}
+
+/// Execution status for automation runs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionStatus {
+    Pending,
+    Running,
+    Success,
+    Failed,
+    Cancelled,
+    Skipped,
+}
+
+/// A record of a single automation execution.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutomationExecution {
+    pub id: Uuid,
+    pub automation_id: Uuid,
+    pub mission_id: Uuid,
+    /// When this execution was triggered
+    pub triggered_at: String,
+    /// What triggered this execution
+    pub trigger_source: String, // "interval", "webhook", "manual"
+    /// Current execution status
+    pub status: ExecutionStatus,
+    /// Webhook payload (if triggered by webhook)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub webhook_payload: Option<serde_json::Value>,
+    /// Variables that were substituted in the command
+    #[serde(default)]
+    pub variables_used: HashMap<String, String>,
+    /// When execution completed (success or failure)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completed_at: Option<String>,
+    /// Error message if execution failed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Number of retry attempts made
+    #[serde(default)]
+    pub retry_count: u32,
+}
+
+/// Get current timestamp as RFC3339 string.
+pub fn now_string() -> String {
+    Utc::now().to_rfc3339()
+}
+
+/// Sanitize a string for use as a filename.
+pub fn sanitize_filename(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            out.push('_');
+        }
+    }
+    if out.is_empty() {
+        "default".to_string()
+    } else {
+        out
+    }
+}
+
+/// Mission store trait - implemented by all storage backends.
+#[allow(clippy::too_many_arguments)]
+#[async_trait]
+pub trait MissionStore: Send + Sync {
+    /// Whether this store persists data across restarts.
+    fn is_persistent(&self) -> bool;
+
+    /// List missions, ordered by updated_at descending.
+    async fn list_missions(&self, limit: usize, offset: usize) -> Result<Vec<Mission>, String>;
+
+    /// Get a single mission by ID.
+    async fn get_mission(&self, id: Uuid) -> Result<Option<Mission>, String>;
+
+    /// Create a new mission.
+    async fn create_mission(
+        &self,
+        title: Option<&str>,
+        workspace_id: Option<Uuid>,
+        agent: Option<&str>,
+        model_override: Option<&str>,
+        model_effort: Option<&str>,
+        backend: Option<&str>,
+        config_profile: Option<&str>,
+    ) -> Result<Mission, String> {
+        self.create_mission_with_parent(
+            title,
+            workspace_id,
+            agent,
+            model_override,
+            model_effort,
+            backend,
+            config_profile,
+            None,
+            None,
+        )
+        .await
+    }
+
+    /// Create a new mission with optional parent and working directory.
+    async fn create_mission_with_parent(
+        &self,
+        title: Option<&str>,
+        workspace_id: Option<Uuid>,
+        agent: Option<&str>,
+        model_override: Option<&str>,
+        model_effort: Option<&str>,
+        backend: Option<&str>,
+        config_profile: Option<&str>,
+        parent_mission_id: Option<Uuid>,
+        working_directory: Option<&str>,
+    ) -> Result<Mission, String>;
+
+    /// Update mission status.
+    async fn update_mission_status(&self, id: Uuid, status: MissionStatus) -> Result<(), String>;
+
+    /// Update mission status with terminal reason (for failed/completed missions).
+    async fn update_mission_status_with_reason(
+        &self,
+        id: Uuid,
+        status: MissionStatus,
+        terminal_reason: Option<&str>,
+    ) -> Result<(), String>;
+
+    /// Update mission conversation history.
+    async fn update_mission_history(
+        &self,
+        id: Uuid,
+        history: &[MissionHistoryEntry],
+    ) -> Result<(), String>;
+
+    /// Update mission desktop sessions.
+    async fn update_mission_desktop_sessions(
+        &self,
+        id: Uuid,
+        sessions: &[DesktopSessionInfo],
+    ) -> Result<(), String>;
+
+    /// Update mission title.
+    async fn update_mission_title(&self, id: Uuid, title: &str) -> Result<(), String>;
+
+    /// Update mission metadata generated by backend (title + short description).
+    /// Field semantics are tri-state:
+    /// - `None` => leave unchanged
+    /// - `Some(Some(value))` => set value
+    /// - `Some(None)` => clear value
+    async fn update_mission_metadata(
+        &self,
+        id: Uuid,
+        title: Option<Option<&str>>,
+        short_description: Option<Option<&str>>,
+        metadata_source: Option<Option<&str>>,
+        metadata_model: Option<Option<&str>>,
+        metadata_version: Option<Option<&str>>,
+    ) -> Result<(), String>;
+
+    /// Update mission session ID (for backends like Amp that generate their own IDs).
+    async fn update_mission_session_id(&self, id: Uuid, session_id: &str) -> Result<(), String>;
+
+    /// Update mission agent tree.
+    async fn update_mission_tree(&self, id: Uuid, tree: &AgentTreeNode) -> Result<(), String>;
+
+    /// Get mission agent tree.
+    async fn get_mission_tree(&self, id: Uuid) -> Result<Option<AgentTreeNode>, String>;
+
+    /// Get all child missions of a parent mission.
+    async fn get_child_missions(&self, parent_mission_id: Uuid) -> Result<Vec<Mission>, String> {
+        let _ = parent_mission_id;
+        Ok(vec![])
+    }
+
+    /// Delete a mission.
+    async fn delete_mission(&self, id: Uuid) -> Result<bool, String>;
+
+    /// Delete empty untitled missions, excluding the specified IDs.
+    async fn delete_empty_untitled_missions_excluding(
+        &self,
+        exclude: &[Uuid],
+    ) -> Result<usize, String>;
+
+    /// Get missions that have been active but stale for the specified hours.
+    async fn get_stale_active_missions(&self, stale_hours: u64) -> Result<Vec<Mission>, String>;
+
+    /// Get all missions currently in active status (for startup recovery).
+    async fn get_all_active_missions(&self) -> Result<Vec<Mission>, String>;
+
+    /// Insert a mission summary (for historical lookup).
+    async fn insert_mission_summary(
+        &self,
+        mission_id: Uuid,
+        summary: &str,
+        key_files: &[String],
+        success: bool,
+    ) -> Result<(), String>;
+
+    // === Event logging methods (default no-op for backward compatibility) ===
+
+    /// Log a streaming event. Called for every AgentEvent during execution.
+    async fn log_event(&self, mission_id: Uuid, event: &AgentEvent) -> Result<(), String> {
+        let _ = (mission_id, event);
+        Ok(())
+    }
+
+    /// Get all events for a mission (for replay/debugging).
+    async fn get_events(
+        &self,
+        mission_id: Uuid,
+        event_types: Option<&[&str]>,
+        limit: Option<usize>,
+        offset: Option<usize>,
+    ) -> Result<Vec<StoredEvent>, String> {
+        let _ = (mission_id, event_types, limit, offset);
+        Ok(vec![])
+    }
+
+    /// Get total cost in cents across all missions.
+    /// Aggregates assistant_message metadata cost across all events.
+    async fn get_total_cost_cents(&self) -> Result<u64, String> {
+        Ok(0)
+    }
+
+    /// Get cost in cents grouped by source (actual, estimated, unknown).
+    /// Returns (actual, estimated, unknown) tuple.
+    async fn get_cost_by_source(&self) -> Result<(u64, u64, u64), String> {
+        Ok((0, 0, 0))
+    }
+
+    /// Get total cost in cents for events created on or after `since` (ISO-8601).
+    async fn get_total_cost_cents_since(&self, _since: &str) -> Result<u64, String> {
+        Ok(0)
+    }
+
+    /// Get cost in cents grouped by source, for events on or after `since` (ISO-8601).
+    async fn get_cost_by_source_since(&self, _since: &str) -> Result<(u64, u64, u64), String> {
+        Ok((0, 0, 0))
+    }
+
+    // === Automation methods (default no-op for backward compatibility) ===
+
+    /// Create an automation for a mission.
+    async fn create_automation(&self, automation: Automation) -> Result<Automation, String> {
+        let _ = automation;
+        Err("Automations not supported by this store".to_string())
+    }
+
+    /// Get all automations for a mission.
+    async fn get_mission_automations(&self, mission_id: Uuid) -> Result<Vec<Automation>, String> {
+        let _ = mission_id;
+        Ok(vec![])
+    }
+
+    /// List all active automations across missions.
+    async fn list_active_automations(&self) -> Result<Vec<Automation>, String> {
+        Ok(vec![])
+    }
+
+    /// Get an automation by ID.
+    async fn get_automation(&self, id: Uuid) -> Result<Option<Automation>, String> {
+        let _ = id;
+        Ok(None)
+    }
+
+    /// Update an automation.
+    async fn update_automation(&self, automation: Automation) -> Result<(), String> {
+        let _ = automation;
+        Err("Automations not supported by this store".to_string())
+    }
+
+    /// Update automation active status.
+    async fn update_automation_active(&self, id: Uuid, active: bool) -> Result<(), String> {
+        let _ = (id, active);
+        Err("Automations not supported by this store".to_string())
+    }
+
+    /// Update automation last triggered time.
+    async fn update_automation_last_triggered(&self, id: Uuid) -> Result<(), String> {
+        let _ = id;
+        Err("Automations not supported by this store".to_string())
+    }
+
+    /// Delete an automation.
+    async fn delete_automation(&self, id: Uuid) -> Result<bool, String> {
+        let _ = id;
+        Ok(false)
+    }
+
+    /// Get automation by webhook ID.
+    async fn get_automation_by_webhook_id(
+        &self,
+        webhook_id: &str,
+    ) -> Result<Option<Automation>, String> {
+        let _ = webhook_id;
+        Ok(None)
+    }
+
+    // === Automation Execution methods ===
+
+    /// Create an automation execution record.
+    async fn create_automation_execution(
+        &self,
+        execution: AutomationExecution,
+    ) -> Result<AutomationExecution, String> {
+        let _ = execution;
+        Err("Automation executions not supported by this store".to_string())
+    }
+
+    /// Update an automation execution record.
+    async fn update_automation_execution(
+        &self,
+        execution: AutomationExecution,
+    ) -> Result<(), String> {
+        let _ = execution;
+        Err("Automation executions not supported by this store".to_string())
+    }
+
+    /// Get execution history for an automation.
+    async fn get_automation_executions(
+        &self,
+        automation_id: Uuid,
+        limit: Option<usize>,
+    ) -> Result<Vec<AutomationExecution>, String> {
+        let _ = (automation_id, limit);
+        Ok(vec![])
+    }
+
+    /// Get execution history for a mission.
+    async fn get_mission_automation_executions(
+        &self,
+        mission_id: Uuid,
+        limit: Option<usize>,
+    ) -> Result<Vec<AutomationExecution>, String> {
+        let _ = (mission_id, limit);
+        Ok(vec![])
+    }
+
+    /// Complete all running automation executions for a mission, setting them
+    /// to either Success or Failed based on the agent outcome.
+    async fn complete_running_executions_for_mission(
+        &self,
+        mission_id: Uuid,
+        success: bool,
+        error: Option<String>,
+    ) -> Result<u32, String> {
+        let _ = (mission_id, success, error);
+        Ok(0)
+    }
+}
+
+/// Mission store type selection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MissionStoreType {
+    Memory,
+    File,
+    #[default]
+    Sqlite,
+}
+
+impl MissionStoreType {
+    /// Parse from environment variable value.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "memory" => Self::Memory,
+            "file" | "json" => Self::File,
+            "sqlite" | "db" => Self::Sqlite,
+            _ => Self::default(),
+        }
+    }
+}
+
+impl std::str::FromStr for MissionStoreType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_str(s))
+    }
+}
+
+/// Create a mission store based on type and configuration.
+pub async fn create_mission_store(
+    store_type: MissionStoreType,
+    base_dir: PathBuf,
+    user_id: &str,
+) -> Result<Box<dyn MissionStore>, String> {
+    match store_type {
+        MissionStoreType::Memory => Ok(Box::new(InMemoryMissionStore::new())),
+        MissionStoreType::File => {
+            let store = FileMissionStore::new(base_dir, user_id).await?;
+            Ok(Box::new(store))
+        }
+        MissionStoreType::Sqlite => {
+            let store = SqliteMissionStore::new(base_dir, user_id).await?;
+            Ok(Box::new(store))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that missions are created with Pending status (not Active).
+    /// This is critical to prevent the race condition where startup recovery
+    /// marks newly created missions as interrupted.
+    #[tokio::test]
+    async fn test_mission_created_with_pending_status() {
+        let store = InMemoryMissionStore::new();
+
+        let mission = store
+            .create_mission(Some("Test Mission"), None, None, None, None, None, None)
+            .await
+            .expect("Failed to create mission");
+
+        assert_eq!(
+            mission.status,
+            MissionStatus::Pending,
+            "New missions should have Pending status, not {:?}",
+            mission.status
+        );
+    }
+
+    /// Test that Pending missions are NOT returned by get_all_active_missions.
+    /// This ensures the orphan detection won't mark Pending missions as interrupted.
+    #[tokio::test]
+    async fn test_pending_missions_not_in_active_list() {
+        let store = InMemoryMissionStore::new();
+
+        // Create a pending mission
+        let mission = store
+            .create_mission(Some("Pending Mission"), None, None, None, None, None, None)
+            .await
+            .expect("Failed to create mission");
+
+        assert_eq!(mission.status, MissionStatus::Pending);
+
+        // get_all_active_missions should NOT include pending missions
+        let active_missions = store
+            .get_all_active_missions()
+            .await
+            .expect("Failed to get active missions");
+
+        assert!(
+            active_missions.is_empty(),
+            "Pending missions should not appear in active missions list"
+        );
+    }
+
+    /// Test that missions transition correctly from Pending to Active.
+    #[tokio::test]
+    async fn test_mission_status_transition_pending_to_active() {
+        let store = InMemoryMissionStore::new();
+
+        // Create a pending mission
+        let mission = store
+            .create_mission(Some("Test Mission"), None, None, None, None, None, None)
+            .await
+            .expect("Failed to create mission");
+
+        assert_eq!(mission.status, MissionStatus::Pending);
+
+        // Update status to Active
+        store
+            .update_mission_status(mission.id, MissionStatus::Active)
+            .await
+            .expect("Failed to update status");
+
+        // Verify status changed
+        let updated = store
+            .get_mission(mission.id)
+            .await
+            .expect("Failed to get mission")
+            .expect("Mission not found");
+
+        assert_eq!(
+            updated.status,
+            MissionStatus::Active,
+            "Mission status should be Active after update"
+        );
+
+        // Now it should appear in active missions
+        let active_missions = store
+            .get_all_active_missions()
+            .await
+            .expect("Failed to get active missions");
+
+        assert_eq!(
+            active_missions.len(),
+            1,
+            "Active mission should appear in active missions list"
+        );
+        assert_eq!(active_missions[0].id, mission.id);
+    }
+
+    /// Test the orphan detection scenario: Active missions should be detected,
+    /// but Pending missions should not.
+    #[tokio::test]
+    async fn test_orphan_detection_ignores_pending() {
+        let store = InMemoryMissionStore::new();
+
+        // Create two missions
+        let pending_mission = store
+            .create_mission(Some("Pending"), None, None, None, None, None, None)
+            .await
+            .expect("Failed to create pending mission");
+
+        let active_mission = store
+            .create_mission(Some("Will be Active"), None, None, None, None, None, None)
+            .await
+            .expect("Failed to create mission");
+
+        // Activate only one mission
+        store
+            .update_mission_status(active_mission.id, MissionStatus::Active)
+            .await
+            .expect("Failed to activate mission");
+
+        // Check active missions (simulating orphan detection)
+        let active_missions = store
+            .get_all_active_missions()
+            .await
+            .expect("Failed to get active missions");
+
+        // Only the active mission should be in the list
+        assert_eq!(
+            active_missions.len(),
+            1,
+            "Only Active missions should be returned, not Pending ones"
+        );
+        assert_eq!(active_missions[0].id, active_mission.id);
+
+        // Pending mission should still exist but not be in active list
+        let pending = store
+            .get_mission(pending_mission.id)
+            .await
+            .expect("Failed to get pending mission")
+            .expect("Pending mission not found");
+        assert_eq!(pending.status, MissionStatus::Pending);
+    }
+
+    /// Test MissionStatus Display implementation includes Pending.
+    #[test]
+    fn test_mission_status_display() {
+        assert_eq!(format!("{}", MissionStatus::Pending), "pending");
+        assert_eq!(format!("{}", MissionStatus::Active), "active");
+        assert_eq!(format!("{}", MissionStatus::Completed), "completed");
+        assert_eq!(format!("{}", MissionStatus::Interrupted), "interrupted");
+    }
+}

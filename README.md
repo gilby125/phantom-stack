@@ -2,12 +2,13 @@
 
 A unified set of autonomous agent extensions for **sandboxed.sh**.
 
-This repository contains the sidecars that sit around the base orchestrator:
+This repository now contains both the base orchestrator and the sidecars in one deployable tree:
+- `sandboxed.sh`
 - `phantom-relay`
 - `memory-mcp`
 - `evolution-worker`
 
-Prerequisite: `sandboxed.sh` must already be conceptually valid for the `opencode` backend. This stack extends the orchestrator; it does not replace it.
+The compose file builds `sandboxed.sh` locally from `./sandboxed.sh`, so the stack is self-contained.
 
 ## Repos
 
