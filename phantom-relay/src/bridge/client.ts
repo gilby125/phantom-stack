@@ -31,7 +31,16 @@ export class SandboxedClient {
   }
 
   streamEvents(onEvent: (e: SandboxedEvent) => void, onError?: (e: any) => void): () => void {
-    const es = new EventSource(`${this.baseUrl}/api/control/stream`, { headers: this.h } as any);
+    const es = new EventSource(`${this.baseUrl}/api/control/stream`, {
+      fetch: (input, init) =>
+        fetch(input, {
+          ...init,
+          headers: {
+            ...(init?.headers ?? {}),
+            ...this.h,
+          },
+        }),
+    });
     const types = ['status', 'assistant_message', 'thinking', 'tool_call', 'tool_result', 'error'];
     types.forEach(type => {
       es.addEventListener(type, (e: any) => {
