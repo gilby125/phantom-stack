@@ -155,7 +155,7 @@ pub fn verify_token_for_config(token: &str, config: &Config) -> bool {
         return false;
     };
     match config.auth.auth_mode(config.dev_mode) {
-        AuthMode::MultiUser => user_for_claims(&claims, &config.auth.users).is_some(),
+        AuthMode::MultiUser => auth_user_for_claims(&claims, &config.auth.users).is_some(),
         AuthMode::SingleTenant => true,
         AuthMode::Disabled => true,
     }
@@ -267,6 +267,9 @@ pub async fn require_auth(
     mut req: Request<Body>,
     next: Next,
 ) -> Response {
+    let path = req.uri().path().to_string();
+    let auth_mode = state.config.auth.auth_mode(state.config.dev_mode);
+
     // Dev mode => no auth checks.
     if state.config.dev_mode {
         req.extensions_mut().insert(AuthUser {
@@ -280,6 +283,12 @@ pub async fn require_auth(
     let secret = match state.config.auth.jwt_secret.as_deref() {
         Some(s) => s,
         None => {
+            tracing::error!(
+                reason = "missing_jwt_secret",
+                path = %path,
+                auth_mode = ?auth_mode,
+                "auth rejected"
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "JWT_SECRET not configured",
@@ -301,15 +310,29 @@ pub async fn require_auth(
         .trim();
 
     if token.is_empty() {
+        tracing::warn!(
+            reason = "missing_authorization_header",
+            path = %path,
+            auth_mode = ?auth_mode,
+            "auth rejected"
+        );
         return (StatusCode::UNAUTHORIZED, "Missing Authorization header").into_response();
     }
 
     match verify_jwt(token, secret) {
         Ok(claims) => {
             let user = match state.config.auth.auth_mode(state.config.dev_mode) {
-                AuthMode::MultiUser => match user_for_claims(&claims, &state.config.auth.users) {
+                AuthMode::MultiUser => match auth_user_for_claims(&claims, &state.config.auth.users) {
                     Some(u) => u,
                     None => {
+                        tracing::warn!(
+                            reason = "invalid_user",
+                            path = %path,
+                            auth_mode = ?auth_mode,
+                            token_sub = %claims.sub,
+                            token_usr = %claims.usr,
+                            "auth rejected"
+                        );
                         return (StatusCode::UNAUTHORIZED, "Invalid user").into_response();
                     }
                 },
@@ -325,7 +348,16 @@ pub async fn require_auth(
             req.extensions_mut().insert(user);
             next.run(req).await
         }
-        Err(_) => (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response(),
+        Err(err) => {
+            tracing::warn!(
+                reason = "invalid_or_expired_token",
+                path = %path,
+                auth_mode = ?auth_mode,
+                error = %err,
+                "auth rejected"
+            );
+            (StatusCode::UNAUTHORIZED, "Invalid or expired token").into_response()
+        }
     }
 }
 
@@ -346,6 +378,27 @@ fn user_for_claims(claims: &Claims, users: &[UserAccount]) -> Option<AuthUser> {
             id: effective_user_id(u),
             username: u.username.clone(),
         })
+}
+
+fn auth_user_for_claims(claims: &Claims, users: &[UserAccount]) -> Option<AuthUser> {
+    if let Some(user) = user_for_claims(claims, users) {
+        return Some(user);
+    }
+
+    let subject = claims.sub.trim();
+    if subject.is_empty() {
+        return None;
+    }
+
+    let username = claims.usr.trim();
+    Some(AuthUser {
+        id: subject.to_string(),
+        username: if username.is_empty() {
+            subject.to_string()
+        } else {
+            username.to_string()
+        },
+    })
 }
 
 // ─── Auth status & password change endpoints ─────────────────────────────

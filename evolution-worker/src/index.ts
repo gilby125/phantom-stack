@@ -57,6 +57,17 @@ function readJwtExp(token: string): number | null {
   }
 }
 
+function readJwtSub(token: string): string | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return typeof payload.sub === 'string' ? payload.sub : null;
+  } catch {
+    return null;
+  }
+}
+
 const SANDBOXED_JWT_SECRET = process.env.SANDBOXED_JWT_SECRET?.trim();
 const SANDBOXED_JWT = normalizeToken(process.env.SANDBOXED_JWT)
   || (SANDBOXED_JWT_SECRET ? mintServiceJwt(SANDBOXED_JWT_SECRET) : 'dev');
@@ -65,8 +76,9 @@ const LIBRARY_REPO = process.env.LIBRARY_REPO_URL;
 {
   const source = normalizeToken(process.env.SANDBOXED_JWT) ? 'env_token' : (SANDBOXED_JWT_SECRET ? 'minted_from_secret' : 'dev_fallback');
   const exp = readJwtExp(SANDBOXED_JWT);
+  const sub = readJwtSub(SANDBOXED_JWT);
   const expIso = exp ? new Date(exp * 1000).toISOString() : 'unknown';
-  console.log(`[worker] auth token source=${source} exp=${expIso}`);
+  console.log(`[worker] auth token source=${source} sub=${sub ?? 'unknown'} exp=${expIso}`);
 }
 
 if (!LIBRARY_REPO) {
@@ -189,5 +201,31 @@ function listenForMissions(): void {
   es.onerror = (err: any) => console.error('[worker] SSE stream error', err);
 }
 
-listenForMissions();
-console.log('[evolution-worker] Listening for completed Sandboxed.sh missions...');
+async function runStartupChecks(): Promise<void> {
+  const headers = { Authorization: `Bearer ${SANDBOXED_JWT}` };
+  try {
+    const res = await axios.get(`${SANDBOXED_URL}/api/auth/status`, {
+      headers,
+      validateStatus: () => true,
+      timeout: 10_000,
+    });
+    const body =
+      typeof res.data === 'string'
+        ? res.data
+        : JSON.stringify(res.data);
+    console.log(`[worker] auth probe /api/auth/status -> ${res.status} ${body.slice(0, 300)}`);
+  } catch (err) {
+    console.error('[worker] auth probe request failed', err);
+  }
+}
+
+async function main(): Promise<void> {
+  await runStartupChecks();
+  listenForMissions();
+  console.log('[evolution-worker] Listening for completed Sandboxed.sh missions...');
+}
+
+main().catch((err) => {
+  console.error('[worker] fatal startup error', err);
+  process.exit(1);
+});
