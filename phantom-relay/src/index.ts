@@ -30,7 +30,7 @@ function mintServiceJwt(secret: string): string {
 
 async function main() {
   const secret = process.env.SANDBOXED_JWT_SECRET?.trim();
-  const token = secret ? mintServiceJwt(secret) : (process.env.SANDBOXED_JWT || 'dev');
+  const token = process.env.SANDBOXED_JWT || (secret ? mintServiceJwt(secret) : 'dev');
   const client = new SandboxedClient(
     normalizeSandboxedUrl(process.env.SANDBOXED_URL || 'http://localhost:3000'),
     token

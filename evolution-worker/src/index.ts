@@ -33,9 +33,8 @@ function mintServiceJwt(secret: string): string {
 }
 
 const SANDBOXED_JWT_SECRET = process.env.SANDBOXED_JWT_SECRET?.trim();
-const SANDBOXED_JWT = SANDBOXED_JWT_SECRET
-  ? mintServiceJwt(SANDBOXED_JWT_SECRET)
-  : (process.env.SANDBOXED_JWT || 'dev');
+const SANDBOXED_JWT = process.env.SANDBOXED_JWT
+  || (SANDBOXED_JWT_SECRET ? mintServiceJwt(SANDBOXED_JWT_SECRET) : 'dev');
 const LIBRARY_REPO = process.env.LIBRARY_REPO_URL;
 
 if (!LIBRARY_REPO) {
