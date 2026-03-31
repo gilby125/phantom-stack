@@ -1,4 +1,6 @@
 FROM node:20-bookworm-slim
+ARG CACHE_BREAKER=2024-03-31-01
+
 WORKDIR /app
 RUN apt-get update && apt-get install -y python3 make g++ && rm -rf /var/lib/apt/lists/*
 COPY package*.json ./
