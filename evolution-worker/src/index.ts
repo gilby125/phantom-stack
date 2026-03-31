@@ -224,7 +224,14 @@ async function runStartupChecks(): Promise<void> {
         : JSON.stringify(res.data);
     console.log(`[worker] auth probe /api/auth/status -> ${res.status} ${body.slice(0, 300)}`);
   } catch (err) {
-    console.error('[worker] auth probe request failed', err);
+    if (axios.isAxiosError(err)) {
+      const detail = err.response?.data
+        ? (typeof err.response.data === 'string' ? err.response.data : JSON.stringify(err.response.data))
+        : (err.cause instanceof Error ? err.cause.message : err.message);
+      console.error(`[worker] auth probe request failed status=${err.response?.status ?? 'none'} detail=${detail}`);
+    } else {
+      console.error('[worker] auth probe request failed', err);
+    }
   }
 }
 

@@ -138,7 +138,7 @@ RUN chmod +x /entrypoint.sh
 RUN mkdir -p /root/.sandboxed-sh /root/.claude /root/work/screenshots
 
 # -- Environment defaults -----------------------------------------------------
-ENV HOST=127.0.0.1 \
+ENV HOST=0.0.0.0 \
     PORT=3000 \
     WORKING_DIR=/root \
     DEV_MODE=true \

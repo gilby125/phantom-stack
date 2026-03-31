@@ -17,6 +17,7 @@ services:
       - "3333:80"
     environment:
       - DEV_MODE=false
+      - HOST=0.0.0.0
       - DASHBOARD_PASSWORD=${SANDBOXED_DASHBOARD_PASSWORD}
       - JWT_SECRET=${SANDBOXED_JWT_SECRET}
       - JWT_TTL_DAYS=30
@@ -31,7 +32,7 @@ services:
     build: ./phantom-relay
     container_name: phantom-relay
     environment:
-      - SANDBOXED_URL=http://sandboxed
+      - SANDBOXED_URL=http://sandboxed:3000
       - SANDBOXED_JWT_SECRET=${SANDBOXED_JWT_SECRET}
       - SANDBOXED_JWT=${SANDBOXED_JWT}
       - SANDBOXED_BACKEND=opencode
@@ -47,7 +48,7 @@ services:
     build: ./evolution-worker
     container_name: evolution-worker
     environment:
-      - SANDBOXED_URL=http://sandboxed
+      - SANDBOXED_URL=http://sandboxed:3000
       - SANDBOXED_JWT_SECRET=${SANDBOXED_JWT_SECRET}
       - SANDBOXED_JWT=${SANDBOXED_JWT}
       - LIBRARY_REPO_URL=${LIBRARY_REPO_URL}
