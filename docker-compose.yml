@@ -32,6 +32,7 @@ services:
     container_name: phantom-relay
     environment:
       - SANDBOXED_URL=http://sandboxed
+      - SANDBOXED_JWT_SECRET=${SANDBOXED_JWT_SECRET}
       - SANDBOXED_JWT=${SANDBOXED_JWT}
       - SANDBOXED_BACKEND=opencode
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
@@ -47,6 +48,7 @@ services:
     container_name: evolution-worker
     environment:
       - SANDBOXED_URL=http://sandboxed
+      - SANDBOXED_JWT_SECRET=${SANDBOXED_JWT_SECRET}
       - SANDBOXED_JWT=${SANDBOXED_JWT}
       - LIBRARY_REPO_URL=${LIBRARY_REPO_URL}
       - EVOLUTION_USE_LLM_JUDGES=${EVOLUTION_USE_LLM_JUDGES}

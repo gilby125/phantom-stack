@@ -43,6 +43,8 @@ If you only need to fix a desynced/expired worker service token (without changin
 ./scripts/regen-service-jwt.sh
 ```
 
+For Komodo deployments, set the same `SANDBOXED_JWT_SECRET` on `sandboxed`, `evolution-worker`, and `phantom-relay`. The sidecars now mint their own service token from that secret at startup, so `SANDBOXED_JWT` is optional.
+
 ## ⚙️ Configuration
 
 For detailed post-deployment setup, including **OpenCode** architecture, Slack/Telegram integration, and Memory Tier (Qdrant/Ollama) configuration, see the:

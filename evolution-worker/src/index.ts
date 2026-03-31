@@ -1,5 +1,6 @@
 import axios from 'axios';
 import { EventSource } from 'eventsource';
+import { createHmac } from 'node:crypto';
 import { join } from 'node:path';
 import { EvolutionEngine } from './evolution/engine.js';
 import { EvolutionConfigSchema, type EvolutionConfig } from './evolution/config.js';
@@ -20,7 +21,21 @@ function normalizeSandboxedUrl(raw: string): string {
 }
 
 const SANDBOXED_URL = normalizeSandboxedUrl(process.env.SANDBOXED_URL || 'http://localhost:3000');
-const SANDBOXED_JWT = process.env.SANDBOXED_JWT || 'dev';
+function mintServiceJwt(secret: string): string {
+  const now = Math.floor(Date.now() / 1000);
+  const exp = now + 30 * 24 * 60 * 60;
+  const header = { alg: 'HS256', typ: 'JWT' };
+  const payload = { sub: 'default', usr: 'default', iat: now, exp };
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
+  const unsigned = `${encode(header)}.${encode(payload)}`;
+  const sig = createHmac('sha256', secret).update(unsigned).digest('base64url');
+  return `${unsigned}.${sig}`;
+}
+
+const SANDBOXED_JWT_SECRET = process.env.SANDBOXED_JWT_SECRET?.trim();
+const SANDBOXED_JWT = SANDBOXED_JWT_SECRET
+  ? mintServiceJwt(SANDBOXED_JWT_SECRET)
+  : (process.env.SANDBOXED_JWT || 'dev');
 const LIBRARY_REPO = process.env.LIBRARY_REPO_URL;
 
 if (!LIBRARY_REPO) {
