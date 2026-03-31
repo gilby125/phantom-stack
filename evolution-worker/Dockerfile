@@ -5,7 +5,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev --build-from-source
 COPY src/ ./src/
 COPY tsconfig.json ./
-ENV SANDBOXED_URL=http://sandboxed:3000
+ENV SANDBOXED_URL=http://sandboxed
 ENV SANDBOXED_JWT=change-me
 ENV LIBRARY_REPO_URL=''
 ENV ANTHROPIC_API_KEY=''
