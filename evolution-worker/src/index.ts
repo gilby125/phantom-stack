@@ -32,10 +32,42 @@ function mintServiceJwt(secret: string): string {
   return `${unsigned}.${sig}`;
 }
 
+function normalizeToken(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"'))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    const inner = trimmed.slice(1, -1).trim();
+    return inner || undefined;
+  }
+  return trimmed;
+}
+
+function readJwtExp(token: string): number | null {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return typeof payload.exp === 'number' ? payload.exp : null;
+  } catch {
+    return null;
+  }
+}
+
 const SANDBOXED_JWT_SECRET = process.env.SANDBOXED_JWT_SECRET?.trim();
-const SANDBOXED_JWT = process.env.SANDBOXED_JWT
+const SANDBOXED_JWT = normalizeToken(process.env.SANDBOXED_JWT)
   || (SANDBOXED_JWT_SECRET ? mintServiceJwt(SANDBOXED_JWT_SECRET) : 'dev');
 const LIBRARY_REPO = process.env.LIBRARY_REPO_URL;
+
+{
+  const source = normalizeToken(process.env.SANDBOXED_JWT) ? 'env_token' : (SANDBOXED_JWT_SECRET ? 'minted_from_secret' : 'dev_fallback');
+  const exp = readJwtExp(SANDBOXED_JWT);
+  const expIso = exp ? new Date(exp * 1000).toISOString() : 'unknown';
+  console.log(`[worker] auth token source=${source} exp=${expIso}`);
+}
 
 if (!LIBRARY_REPO) {
   console.error('FATAL: LIBRARY_REPO_URL is required to clone and push evolution updates.');

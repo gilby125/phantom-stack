@@ -28,9 +28,23 @@ function mintServiceJwt(secret: string): string {
   return `${unsigned}.${sig}`;
 }
 
+function normalizeToken(raw: string | undefined): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"'))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) {
+    const inner = trimmed.slice(1, -1).trim();
+    return inner || undefined;
+  }
+  return trimmed;
+}
+
 async function main() {
   const secret = process.env.SANDBOXED_JWT_SECRET?.trim();
-  const token = process.env.SANDBOXED_JWT || (secret ? mintServiceJwt(secret) : 'dev');
+  const token = normalizeToken(process.env.SANDBOXED_JWT) || (secret ? mintServiceJwt(secret) : 'dev');
   const client = new SandboxedClient(
     normalizeSandboxedUrl(process.env.SANDBOXED_URL || 'http://localhost:3000'),
     token
