@@ -62,7 +62,7 @@ async function main() {
   }
 
   console.log('[phantom-relay] Started.');
-  await new Promise<void>(() => {});
+  setInterval(() => {}, 60 * 60 * 1000);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
