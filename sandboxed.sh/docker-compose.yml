@@ -3,7 +3,7 @@ services:
     build: .
     restart: unless-stopped
     ports:
-      - "3000:80"
+      - "3333:80"
     volumes:
       - sandboxed-data:/root/.sandboxed-sh
       - claude-auth:/root/.claude
