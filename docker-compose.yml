@@ -12,24 +12,28 @@ services:
     image: ghcr.io/th0rgal/sandboxed.sh:latest
     container_name: sandboxed
     privileged: true
+    cgroup: host
     ports:
-      - "3000:3000"
+      - "3000:80"
     environment:
-      - RUST_LOG=info
-      - LISTEN_ADDR=0.0.0.0:3000
-      - SANDBOXED_USERS=admin:${RELAY_JWT}
+      - DEV_MODE=false
+      - DASHBOARD_PASSWORD=${SANDBOXED_DASHBOARD_PASSWORD}
+      - JWT_SECRET=${SANDBOXED_JWT_SECRET}
+      - JWT_TTL_DAYS=30
+      - LIBRARY_REMOTE=${LIBRARY_REPO_URL}
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - sandboxed_data:/data
+      - sandboxed_data:/root/.sandboxed-sh
     networks:
       - sandboxed-net
+    restart: unless-stopped
 
   phantom-relay:
     build: ./phantom-relay
     container_name: phantom-relay
     environment:
-      - SANDBOXED_URL=http://sandboxed:3000
-      - SANDBOXED_JWT=${RELAY_JWT}
+      - SANDBOXED_URL=http://sandboxed
+      - SANDBOXED_JWT=${SANDBOXED_JWT}
+      - SANDBOXED_BACKEND=opencode
       - SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
       - SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
     depends_on:
@@ -42,10 +46,11 @@ services:
     build: ./evolution-worker
     container_name: evolution-worker
     environment:
-      - SANDBOXED_URL=http://sandboxed:3000
-      - SANDBOXED_JWT=${RELAY_JWT}
+      - SANDBOXED_URL=http://sandboxed
+      - SANDBOXED_JWT=${SANDBOXED_JWT}
       - LIBRARY_REPO_URL=${LIBRARY_REPO_URL}
       - EVOLUTION_USE_LLM_JUDGES=${EVOLUTION_USE_LLM_JUDGES}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     depends_on:
       - sandboxed
     networks:
