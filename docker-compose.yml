@@ -14,7 +14,7 @@ services:
     privileged: true
     cgroup: host
     ports:
-      - "3000:80"
+      - "3333:80"
     environment:
       - DEV_MODE=false
       - DASHBOARD_PASSWORD=${SANDBOXED_DASHBOARD_PASSWORD}
@@ -65,7 +65,7 @@ services:
       - QDRANT_URL=http://qdrant:6333
       - OLLAMA_URL=http://ollama:11434
     ports:
-      - "3333:3333"
+      - "3334:3333"
     depends_on:
       qdrant:
         condition: service_started

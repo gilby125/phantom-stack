@@ -27,7 +27,7 @@ The compose file builds `sandboxed.sh` locally from `./sandboxed.sh`, so the sta
    docker compose up -d --build
    ```
 
-Open `http://localhost:3000` for the dashboard.
+Open `http://localhost:3333` for the dashboard.
 
 ## Components
 
