@@ -303,7 +303,7 @@ fn google_authorize_url(challenge: &str, state: &str) -> Result<String, String> 
     let client_id = google_client_id();
 
     url.query_pairs_mut()
-        .append_pair("client_id", client_id)
+        .append_pair("client_id", &client_id)
         .append_pair("response_type", "code")
         .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
         .append_pair("scope", GOOGLE_SCOPES)
@@ -6650,8 +6650,8 @@ async fn oauth_callback_inner(
             let client_id = google_client_id();
             let client_secret = google_client_secret();
             let token_body = url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("client_id", client_id)
-                .append_pair("client_secret", client_secret)
+                .append_pair("client_id", &client_id)
+                .append_pair("client_secret", &client_secret)
                 .append_pair("code", &code)
                 .append_pair("grant_type", "authorization_code")
                 .append_pair("redirect_uri", GOOGLE_REDIRECT_URI)
