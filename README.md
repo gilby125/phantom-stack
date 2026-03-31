@@ -29,6 +29,12 @@ The compose file builds `sandboxed.sh` locally from `./sandboxed.sh`, so the sta
 
 Open `http://localhost:3333` for the dashboard.
 
+## ⚙️ Configuration
+
+For detailed post-deployment setup, including **OpenCode** architecture, Slack/Telegram integration, and Memory Tier (Qdrant/Ollama) configuration, see the:
+
+👉 **[Post-Deployment Configuration Guide](docs/CONFIG_GUIDE.md)**
+
 ## Components
 
 ### `memory-mcp`
