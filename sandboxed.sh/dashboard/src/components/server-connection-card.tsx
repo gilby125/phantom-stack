@@ -7,8 +7,10 @@ import {
   getSystemComponents,
   updateSystemComponent,
   uninstallSystemComponent,
+  listAIProviders,
   ComponentInfo,
   UpdateProgressEvent,
+  AIProvider,
 } from '@/lib/api';
 import {
   Server,
@@ -85,6 +87,43 @@ export function ServerConnectionCard({
     { revalidateOnFocus: false, dedupingInterval: 0 }
   );
   const components = data ?? [];
+  const { data: providersData } = useSWR<AIProvider[]>(
+    'ai-providers-for-components',
+    listAIProviders,
+    { revalidateOnFocus: false, dedupingInterval: 5000 }
+  );
+  const providers = providersData ?? [];
+
+  const providerLineForComponent = (componentName: string): string | null => {
+    const hasCreds = (provider: AIProvider): boolean =>
+      provider.enabled &&
+      (provider.has_api_key || provider.has_oauth || provider.provider_type === 'opencode');
+    const targets = (provider: AIProvider, backend: string): boolean =>
+      Array.isArray(provider.use_for_backends) && provider.use_for_backends.includes(backend);
+
+    if (componentName === 'claude_code') {
+      const configured = providers.some(
+        (provider) => provider.provider_type === 'anthropic' && hasCreds(provider) && targets(provider, 'claudecode')
+      );
+      return configured ? 'Provider configured (Anthropic)' : 'Provider missing (Anthropic)';
+    }
+
+    if (componentName === 'codex') {
+      const configured = providers.some(
+        (provider) => provider.provider_type === 'openai' && hasCreds(provider) && targets(provider, 'codex')
+      );
+      return configured ? 'Provider configured (OpenAI)' : 'Provider missing (OpenAI)';
+    }
+
+    if (componentName === 'opencode') {
+      const count = providers.filter((provider) => hasCreds(provider) && targets(provider, 'opencode')).length;
+      return count > 0
+        ? `Providers configured (${count})`
+        : 'Provider missing (target opencode in AI Providers)';
+    }
+
+    return null;
+  };
 
   const performComponentOperation = async (
     component: ComponentInfo,
@@ -331,6 +370,11 @@ export function ServerConnectionCard({
                       {!component.installed && (
                         <div className="text-xs text-red-400/80 mt-0.5">
                           Not installed
+                        </div>
+                      )}
+                      {component.installed && providerLineForComponent(component.name) && (
+                        <div className="text-xs text-white/50 mt-0.5">
+                          {providerLineForComponent(component.name)}
                         </div>
                       )}
                     </div>
