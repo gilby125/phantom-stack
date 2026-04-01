@@ -282,7 +282,9 @@ impl ProviderType {
             Self::OpenCode => vec![AuthMethod {
                 label: "Local Service (No Login Required)".to_string(),
                 method_type: AuthMethodType::Api,
-                description: Some("Connect directly to your local OpenCode v1.3.11 engine".to_string()),
+                description: Some(
+                    "Connect directly to your local OpenCode v1.3.11 engine".to_string(),
+                ),
             }],
             _ => vec![AuthMethod {
                 label: "API Key".to_string(),

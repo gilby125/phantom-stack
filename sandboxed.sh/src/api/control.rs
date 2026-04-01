@@ -41,8 +41,8 @@ use super::mission_store::{
     self, create_mission_store, now_string, Mission, MissionHistoryEntry, MissionStore,
     MissionStoreType, StoredEvent,
 };
-use crate::ai_providers::SharedAIProviderStore;
 use super::routes::AppState;
+use crate::ai_providers::SharedAIProviderStore;
 
 /// Returns a safe index to truncate a string at, ensuring we don't cut UTF-8 characters.
 pub(super) fn safe_truncate_index(s: &str, max: usize) -> usize {
@@ -3903,7 +3903,7 @@ pub async fn create_mission(
     // 1. Use explicit config_profile from request if provided
     // 2. Otherwise use workspace's config_profile
     // 3. Fall back to "default"
-        let effective_config_profile = if let Some(ref profile) = config_profile {
+    let effective_config_profile = if let Some(ref profile) = config_profile {
         Some(profile.clone())
     } else if let Some(ws_id) = workspace_id {
         state
@@ -6507,13 +6507,13 @@ async fn control_actor_loop(
                                         Some(mission_ctrl),
                                         tree_ref,
                                         progress_ref,
-                                        workspace_id,
                                         mission_id,
+                                        workspace_id,
+                                        backend_id,
                                         model_override,
                                         model_effort,
                                         agent_override,
                                         session_id,
-                                        backend_id,
                                         false, // force_session_resume: regular message, not a resume
                                         mission_config_profile,
                                     )
@@ -7001,7 +7001,7 @@ async fn control_actor_loop(
                                             Some(target_mid),
                                         ).await;
                                         let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: Some(target_mid) });
-                                        let _cfg = config.clone();
+                                        let cfg = config.clone();
                                         let agent = Arc::clone(&root_agent);
                                         let mcp_ref = Arc::clone(&mcp);
                                         let workspaces_ref = Arc::clone(&workspaces);
@@ -7050,13 +7050,13 @@ async fn control_actor_loop(
                                                 Some(mission_ctrl),
                                                 tree_ref,
                                                 progress_ref,
-                                                workspace_id,
                                                 Some(mission_id),
+                                                workspace_id,
+                                                backend_id,
                                                 model_override,
                                                 model_effort,
                                                 agent_override,
                                                 session_id,
-                                                backend_id,
                                                 true, // force_session_resume: this is a resume operation
                                                 mission_config_profile,
                                             )

@@ -626,13 +626,11 @@ fn default_providers_config() -> ProvidersConfig {
                 name: "OpenCode (Local)".to_string(),
                 billing: "free".to_string(),
                 description: "Local inference engine".to_string(),
-                models: vec![
-                    ProviderModel {
-                        id: "opencode-agent".to_string(),
-                        name: "OpenCode Agent".to_string(),
-                        description: Some("Default agentic model".to_string()),
-                    },
-                ],
+                models: vec![ProviderModel {
+                    id: "opencode-agent".to_string(),
+                    name: "OpenCode Agent".to_string(),
+                    description: Some("Default agentic model".to_string()),
+                }],
             },
         ],
     }

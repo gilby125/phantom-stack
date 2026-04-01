@@ -143,7 +143,7 @@ fn default_base_url(provider_type: ProviderType) -> Option<&'static str> {
         ProviderType::Azure => None,
         ProviderType::Cohere => None,
         ProviderType::GithubCopilot => None,
-        ProviderType::Amp => None, // CLI-based, not proxy-compatible
+        ProviderType::Amp => None,      // CLI-based, not proxy-compatible
         ProviderType::OpenCode => None, // CLI-based, not proxy-compatible
     }
 }

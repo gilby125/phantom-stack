@@ -66,7 +66,7 @@ pub async fn get_backend(
 /// List agents for a specific backend
 pub async fn list_backend_agents(
     State(state): State<Arc<AppState>>,
-    Extension(_user): Extension<Arc<AuthUser>>,
+    Extension(_user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<AgentResponse>>, (StatusCode, String)> {
     let registry = state.backend_registry.read().await;
@@ -110,7 +110,11 @@ pub async fn list_backend_agents(
             if !agents.iter().any(|a| a.id == provider_agent_id) {
                 agents.push(AgentResponse {
                     id: provider_agent_id,
-                    name: format!("{} ({})", provider.name, provider.provider_type.display_name()),
+                    name: format!(
+                        "{} ({})",
+                        provider.name,
+                        provider.provider_type.display_name()
+                    ),
                 });
             }
         }

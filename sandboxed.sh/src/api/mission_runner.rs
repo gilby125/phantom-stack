@@ -38,8 +38,8 @@ use super::control::{
     resolve_claudecode_default_model, resolve_gemini_default_model, safe_truncate_index,
     AgentEvent, AgentTreeNode, ControlRunState, ControlStatus, ExecutionProgress, FrontendToolHub,
 };
-use crate::ai_providers::SharedAIProviderStore;
 use super::library::SharedLibrary;
+use crate::ai_providers::SharedAIProviderStore;
 
 #[derive(Debug, Default)]
 struct OpencodeSseState {
@@ -2175,22 +2175,22 @@ async fn run_mission_turn(
         );
     }
 
-    // Execute based on backend (with dynamic routing for hooked-up providers)
-    let mut effective_backend = Cow::Borrowed(backend_id.as_str());
-    
-    // Resolve dynamic backend from hooked-up provider if agent is a UUID
+    // Execute based on backend. Provider-backed agents may be referenced by UUID,
+    // but dispatch still needs the mission's selected backend id.
+    let effective_backend = Cow::Borrowed(backend_id.as_str());
+
+    // Resolve provider-backed agent metadata if agent is a UUID.
     if let Some(ref agent_id) = effective_agent {
         if let Ok(uuid) = uuid::Uuid::parse_str(agent_id) {
             let providers = ai_providers.list().await;
             if let Some(provider) = providers.iter().find(|p| p.id == uuid) {
-                let resolved = provider.provider_type.id();
                 tracing::info!(
                     mission_id = %mission_id,
                     provider_name = %provider.name,
-                    provider_type = %resolved,
-                    "Routing mission to dynamic provider backend"
+                    backend_id = %backend_id,
+                    provider_type = %provider.provider_type.id(),
+                    "Using provider-backed agent on selected backend"
                 );
-                effective_backend = Cow::Borrowed(resolved);
             }
         }
     }

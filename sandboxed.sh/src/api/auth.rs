@@ -322,20 +322,22 @@ pub async fn require_auth(
     match verify_jwt(token, secret) {
         Ok(claims) => {
             let user = match state.config.auth.auth_mode(state.config.dev_mode) {
-                AuthMode::MultiUser => match auth_user_for_claims(&claims, &state.config.auth.users) {
-                    Some(u) => u,
-                    None => {
-                        tracing::warn!(
-                            reason = "invalid_user",
-                            path = %path,
-                            auth_mode = ?auth_mode,
-                            token_sub = %claims.sub,
-                            token_usr = %claims.usr,
-                            "auth rejected"
-                        );
-                        return (StatusCode::UNAUTHORIZED, "Invalid user").into_response();
+                AuthMode::MultiUser => {
+                    match auth_user_for_claims(&claims, &state.config.auth.users) {
+                        Some(u) => u,
+                        None => {
+                            tracing::warn!(
+                                reason = "invalid_user",
+                                path = %path,
+                                auth_mode = ?auth_mode,
+                                token_sub = %claims.sub,
+                                token_usr = %claims.usr,
+                                "auth rejected"
+                            );
+                            return (StatusCode::UNAUTHORIZED, "Invalid user").into_response();
+                        }
                     }
-                },
+                }
                 AuthMode::SingleTenant => AuthUser {
                     id: claims.sub,
                     username: claims.usr,
