@@ -6,6 +6,7 @@ volumes:
   qdrant_data:
   ollama_data:
   sandboxed_data:
+  claude_auth:
 
 services:
   sandboxed:
@@ -24,6 +25,7 @@ services:
       - LIBRARY_REMOTE=${LIBRARY_REPO_URL}
     volumes:
       - sandboxed_data:/root/.sandboxed-sh
+      - claude_auth:/root/.claude
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3000/api/health"]
       interval: 10s
