@@ -3920,15 +3920,23 @@ pub async fn create_mission(
 
     // Validate agent exists before creating mission (fail fast with clear error)
     if let Some(ref agent_id) = agent {
-        let mut is_valid = false;
-
-        // 1. Check if it's a 'hooked up' AI Provider (UUID check)
+        // Disallow selecting provider UUIDs as "agents" (these are different concepts).
         if let Ok(uuid) = uuid::Uuid::parse_str(agent_id) {
             let providers = state.ai_providers.list().await;
-            if providers.iter().any(|p| p.id == uuid && p.enabled) {
-                is_valid = true;
+            if let Some(provider) = providers.iter().find(|p| p.id == uuid && p.enabled) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "Invalid agent '{}': this is a provider account ({}). Select a real agent for the '{}' backend (e.g. build/explore/general/plan), and configure providers under Settings → Providers.",
+                        agent_id,
+                        provider.provider_type.display_name(),
+                        backend.as_deref().unwrap_or("opencode")
+                    ),
+                ));
             }
         }
+
+        let mut is_valid = false;
 
         if !is_valid {
             let backend_id = backend.as_deref().unwrap_or("opencode");
@@ -8261,7 +8269,7 @@ async fn control_actor_loop(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_single_control_turn(
-    ai_providers: SharedAIProviderStore,
+    _ai_providers: SharedAIProviderStore,
     mut config: Config,
     _root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
@@ -8409,29 +8417,7 @@ async fn run_single_control_turn(
     let fallback_workspace = workspace::Workspace::default_host(config.working_dir.clone());
     let exec_workspace = runtime_workspace.as_ref().unwrap_or(&fallback_workspace);
 
-    // Resolve dynamic backend from a hooked-up provider (agent UUID).
-    //
-    // IMPORTANT: Provider type IDs (e.g. "google") are *not* backend IDs. A Google provider may
-    // target "gemini" or "opencode"; an OpenAI provider may target "codex" or "opencode", etc.
-    let requested_backend = backend_id.as_deref().unwrap_or("claudecode").trim();
-    let mut effective_backend = Cow::Borrowed(requested_backend);
-    if let Some(ref agent_id) = agent_override {
-        if let Ok(uuid) = uuid::Uuid::parse_str(agent_id) {
-            let providers = ai_providers.list().await;
-            if let Some(provider) = providers.iter().find(|p| p.id == uuid) {
-                let candidates = provider
-                    .use_for_backends
-                    .clone()
-                    .unwrap_or_else(|| super::ai_providers::default_backends_for_provider(provider.provider_type));
-
-                if !candidates.iter().any(|b| b.trim() == requested_backend) {
-                    if let Some(first) = candidates.first() {
-                        effective_backend = Cow::Owned(first.trim().to_string());
-                    }
-                }
-            }
-        }
-    }
+    let effective_backend = Cow::Borrowed(backend_id.as_deref().unwrap_or("claudecode").trim());
 
     // Execute based on resolved backend
     let result = match effective_backend.as_ref().trim() {
@@ -11646,9 +11632,8 @@ And the report:
 
         clear_mission_metadata_refresh_state(mission_id);
 
-        let task = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        });
+        // Use pending tasks so other tests that manipulate tokio time can't cause these to finish.
+        let task = tokio::spawn(std::future::pending::<()>());
 
         {
             let mut tasks = MISSION_METADATA_REFRESH_TASKS
@@ -11665,9 +11650,7 @@ And the report:
             tasks.insert(
                 other_mission_id,
                 MetadataRefreshTaskEntry {
-                    handle: tokio::spawn(async {
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                    }),
+                    handle: tokio::spawn(std::future::pending::<()>()),
                     force_refresh: false,
                     task_id: 2,
                 },

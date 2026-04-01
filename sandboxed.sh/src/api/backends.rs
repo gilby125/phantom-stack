@@ -187,37 +187,6 @@ pub async fn list_backend_agents(
         }
     };
 
-    // 2. Merge with any 'hooked up' AI Providers for this backend
-    let providers = state.ai_providers.list().await;
-    for provider in providers {
-        if !provider.enabled || !provider.has_credentials() {
-            continue;
-        }
-
-        // Match if provider type ID equals the backend ID OR it's explicitly set for this backend
-        let matches_id = provider.provider_type.id() == id;
-        let explicitly_supported = provider
-            .use_for_backends
-            .as_ref()
-            .map(|backends| backends.iter().any(|b| b == &id))
-            .unwrap_or(false);
-
-        if matches_id || explicitly_supported {
-            // Check for duplicates before adding
-            let provider_agent_id = provider.id.to_string();
-            if !agents.iter().any(|a| a.id == provider_agent_id) {
-                agents.push(AgentResponse {
-                    id: provider_agent_id,
-                    name: format!(
-                        "{} ({})",
-                        provider.name,
-                        provider.provider_type.display_name()
-                    ),
-                });
-            }
-        }
-    }
-
     // Default sort by name
     agents.sort_by(|a, b| a.name.cmp(&b.name));
 
