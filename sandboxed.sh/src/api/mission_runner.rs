@@ -12110,16 +12110,11 @@ impl GeminiCredentials {
 /// Get Google credentials for the Gemini CLI backend.
 ///
 /// Checks (in order):
-/// 1. Environment variables (GEMINI_API_KEY, GOOGLE_API_KEY, etc.)
-/// 2. AI provider store for a Google provider with an API key
-/// 3. Sandboxed-sh credentials store for Google OAuth credentials
-/// 4. OpenCode's auth.json for Google API key or OAuth credentials
+/// 1. AI provider store for a Google provider with an API key
+/// 2. Sandboxed-sh credentials store for Google OAuth credentials
+/// 3. OpenCode's auth.json for Google API key or OAuth credentials
+/// 4. Environment variables (GEMINI_API_KEY, GOOGLE_API_KEY, etc.)
 fn get_google_credentials_for_gemini(working_dir: &std::path::Path) -> GeminiCredentials {
-    // 1. Check environment variables first (most explicit)
-    if let Some(key) = env_google_api_key() {
-        return GeminiCredentials::ApiKey(key);
-    }
-
     let google_targets_gemini = crate::api::ai_providers::provider_targets_backend(
         working_dir,
         crate::ai_providers::ProviderType::Google,
@@ -12130,32 +12125,36 @@ fn get_google_credentials_for_gemini(working_dir: &std::path::Path) -> GeminiCre
         tracing::info!(
             "Google provider does not target 'gemini' backend; skipping provider credentials"
         );
-        return GeminiCredentials::None;
     }
-    // 2. Try to get API key from the AI provider store
-    let store_path = working_dir.join(crate::util::AI_PROVIDERS_PATH);
-    if let Ok(store) = std::fs::read_to_string(&store_path) {
-        if let Ok(providers) = serde_json::from_str::<serde_json::Value>(&store) {
-            if let Some(providers_arr) = providers.as_array() {
-                for provider in providers_arr {
-                    let pt = match provider.get("provider_type").and_then(|v| v.as_str()) {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    if pt != "google" {
-                        continue;
-                    }
-                    let enabled = provider
-                        .get("enabled")
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(true);
-                    if !enabled {
-                        continue;
-                    }
-                    if let Some(key) = provider.get("api_key").and_then(|v| v.as_str()) {
-                        if !key.is_empty() {
-                            tracing::info!("Using Google API key from ai_providers.json");
-                            return GeminiCredentials::ApiKey(key.to_string());
+
+    // 1. Try to get API key from the AI provider store.
+    // API-configured credentials win over env/auth fallbacks so Gemini setup
+    // through the API is not shadowed by older state.
+    if google_targets_gemini {
+        let store_path = working_dir.join(crate::util::AI_PROVIDERS_PATH);
+        if let Ok(store) = std::fs::read_to_string(&store_path) {
+            if let Ok(providers) = serde_json::from_str::<serde_json::Value>(&store) {
+                if let Some(providers_arr) = providers.as_array() {
+                    for provider in providers_arr {
+                        let pt = match provider.get("provider_type").and_then(|v| v.as_str()) {
+                            Some(t) => t,
+                            None => continue,
+                        };
+                        if pt != "google" {
+                            continue;
+                        }
+                        let enabled = provider
+                            .get("enabled")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(true);
+                        if !enabled {
+                            continue;
+                        }
+                        if let Some(key) = provider.get("api_key").and_then(|v| v.as_str()) {
+                            if !key.is_empty() {
+                                tracing::info!("Using Google API key from ai_providers.json");
+                                return GeminiCredentials::ApiKey(key.to_string());
+                            }
                         }
                     }
                 }
@@ -12163,14 +12162,19 @@ fn get_google_credentials_for_gemini(working_dir: &std::path::Path) -> GeminiCre
         }
     }
 
-    // 3. Try sandboxed-sh credentials store for OAuth
+    // 2. Try sandboxed-sh credentials store for OAuth
     if let Some(creds) = read_google_oauth_from_credentials() {
         return creds;
     }
 
-    // 4. Try OpenCode's auth.json
+    // 3. Try OpenCode's auth.json
     if let Some(creds) = read_google_credentials_from_opencode_auth() {
         return creds;
+    }
+
+    // 4. Fall back to environment variables.
+    if let Some(key) = env_google_api_key() {
+        return GeminiCredentials::ApiKey(key);
     }
 
     GeminiCredentials::None
