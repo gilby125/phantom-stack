@@ -2453,6 +2453,11 @@ export async function updateRtkEnabled(
 export interface Backend {
   id: string;
   name: string;
+  enabled?: boolean;
+  /** Whether the CLI for this backend is available on the system */
+  cli_available?: boolean;
+  /** Only present for some backends (e.g. claudecode) */
+  api_key_configured?: boolean;
 }
 
 export interface BackendAgent {

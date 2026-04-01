@@ -19,15 +19,13 @@ use super::routes::AppState;
 pub struct BackendResponse {
     pub id: String,
     pub name: String,
-}
-
-impl From<BackendInfo> for BackendResponse {
-    fn from(info: BackendInfo) -> Self {
-        Self {
-            id: info.id,
-            name: info.name,
-        }
-    }
+    pub enabled: bool,
+    /// Whether the CLI for this backend is available on the system
+    #[serde(default)]
+    pub cli_available: bool,
+    /// Only present for backends that support API-key gating in the UI (e.g. Claude Code).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_configured: Option<bool>,
 }
 
 /// Agent information returned by API
@@ -37,14 +35,85 @@ pub struct AgentResponse {
     pub name: String,
 }
 
+fn cli_available_for_backend(backend_id: &str, settings: &serde_json::Value) -> bool {
+    match backend_id {
+        "claudecode" => {
+            // Check for custom cli_path first, then default 'claude'
+            let cli_path = settings
+                .get("cli_path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("claude");
+            check_cli_available(cli_path)
+        }
+        "amp" => {
+            let cli_path = settings
+                .get("cli_path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("amp");
+            check_cli_available(cli_path)
+        }
+        "codex" => {
+            let cli_path = settings
+                .get("cli_path")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("codex");
+            check_cli_available(cli_path)
+        }
+        "opencode" => {
+            // OpenCode uses oh-my-opencode or opencode CLI
+            check_cli_available("oh-my-opencode") || check_cli_available("opencode")
+        }
+        _ => true,
+    }
+}
+
 /// List all available backends
 pub async fn list_backends(
     State(state): State<Arc<AppState>>,
     Extension(_user): Extension<AuthUser>,
 ) -> Json<Vec<BackendResponse>> {
     let registry = state.backend_registry.read().await;
-    let backends: Vec<BackendResponse> = registry.list().into_iter().map(Into::into).collect();
-    Json(backends)
+    let backends: Vec<BackendInfo> = registry.list();
+    drop(registry);
+
+    let mut out = Vec::with_capacity(backends.len());
+    for info in backends {
+        let config_entry = state.backend_configs.get(&info.id).await;
+        let enabled = config_entry.as_ref().map(|e| e.enabled).unwrap_or(true);
+        let settings = config_entry
+            .as_ref()
+            .map(|e| e.settings.clone())
+            .unwrap_or_else(|| serde_json::json!({}));
+
+        let cli_available = cli_available_for_backend(&info.id, &settings);
+
+        let api_key_configured = if info.id == "claudecode" {
+            let configured = if let Some(store) = state.secrets.as_ref() {
+                match store.list_secrets("claudecode").await {
+                    Ok(secrets) => secrets.iter().any(|s| s.key == "api_key" && !s.is_expired),
+                    Err(_) => false,
+                }
+            } else {
+                false
+            };
+            Some(configured)
+        } else {
+            None
+        };
+
+        out.push(BackendResponse {
+            id: info.id,
+            name: info.name,
+            enabled,
+            cli_available,
+            api_key_configured,
+        });
+    }
+
+    Json(out)
 }
 
 /// Get a specific backend by ID
@@ -55,10 +124,39 @@ pub async fn get_backend(
 ) -> Result<Json<BackendResponse>, (StatusCode, String)> {
     let registry = state.backend_registry.read().await;
     match registry.get(&id) {
-        Some(backend) => Ok(Json(BackendResponse {
-            id: backend.id().to_string(),
-            name: backend.name().to_string(),
-        })),
+        Some(backend) => {
+            drop(registry);
+
+            let config_entry = state.backend_configs.get(&id).await;
+            let enabled = config_entry.as_ref().map(|e| e.enabled).unwrap_or(true);
+            let settings = config_entry
+                .as_ref()
+                .map(|e| e.settings.clone())
+                .unwrap_or_else(|| serde_json::json!({}));
+            let cli_available = cli_available_for_backend(&id, &settings);
+
+            let api_key_configured = if id == "claudecode" {
+                let configured = if let Some(store) = state.secrets.as_ref() {
+                    match store.list_secrets("claudecode").await {
+                        Ok(secrets) => secrets.iter().any(|s| s.key == "api_key" && !s.is_expired),
+                        Err(_) => false,
+                    }
+                } else {
+                    false
+                };
+                Some(configured)
+            } else {
+                None
+            };
+
+            Ok(Json(BackendResponse {
+                id: backend.id().to_string(),
+                name: backend.name().to_string(),
+                enabled,
+                cli_available,
+                api_key_configured,
+            }))
+        }
         None => Err((StatusCode::NOT_FOUND, format!("Backend {} not found", id))),
     }
 }
