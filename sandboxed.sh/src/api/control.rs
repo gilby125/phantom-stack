@@ -3858,8 +3858,11 @@ pub async fn create_mission(
     let mut model_override = req.model_override.clone();
     let mut model_effort = req.model_effort.clone();
     if let Some(value) = backend.as_ref() {
-        if value.trim().is_empty() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
             backend = None;
+        } else if trimmed != value {
+            backend = Some(trimmed.to_string());
         }
     }
     if let Some(value) = model_override.as_ref() {
@@ -8406,19 +8409,32 @@ async fn run_single_control_turn(
     let fallback_workspace = workspace::Workspace::default_host(config.working_dir.clone());
     let exec_workspace = runtime_workspace.as_ref().unwrap_or(&fallback_workspace);
 
-    // Resolve dynamic backend from hooked-up provider if agent is a UUID
-    let mut effective_backend = Cow::Borrowed(backend_id.as_deref().unwrap_or("claudecode"));
+    // Resolve dynamic backend from a hooked-up provider (agent UUID).
+    //
+    // IMPORTANT: Provider type IDs (e.g. "google") are *not* backend IDs. A Google provider may
+    // target "gemini" or "opencode"; an OpenAI provider may target "codex" or "opencode", etc.
+    let requested_backend = backend_id.as_deref().unwrap_or("claudecode").trim();
+    let mut effective_backend = Cow::Borrowed(requested_backend);
     if let Some(ref agent_id) = agent_override {
         if let Ok(uuid) = uuid::Uuid::parse_str(agent_id) {
             let providers = ai_providers.list().await;
             if let Some(provider) = providers.iter().find(|p| p.id == uuid) {
-                effective_backend = Cow::Owned(provider.provider_type.id().to_string());
+                let candidates = provider
+                    .use_for_backends
+                    .clone()
+                    .unwrap_or_else(|| super::ai_providers::default_backends_for_provider(provider.provider_type));
+
+                if !candidates.iter().any(|b| b.trim() == requested_backend) {
+                    if let Some(first) = candidates.first() {
+                        effective_backend = Cow::Owned(first.trim().to_string());
+                    }
+                }
             }
         }
     }
 
     // Execute based on resolved backend
-    let result = match effective_backend.as_ref() {
+    let result = match effective_backend.as_ref().trim() {
         "claudecode" => {
             let mid = match require_mission_id(mission_id, "Claude Code", &events_tx) {
                 Ok(id) => id,

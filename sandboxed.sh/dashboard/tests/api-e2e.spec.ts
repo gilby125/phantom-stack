@@ -21,6 +21,7 @@ type Mission = {
   title?: string | null;
   status?: string;
   workspace_id?: string | null;
+  backend?: string;
 };
 
 type Automation = {
@@ -412,6 +413,14 @@ test("mission and automation endpoints support CRUD flows", async ({ request }) 
   });
   const mission = await expectJsonOk<Mission>(missionRes, "POST /api/control/missions");
   suite.createdMissionIds.push(mission.id);
+
+  // Fail-fast: reject unknown backend IDs (no aliasing/mapping).
+  const badBackendRes = await apiPost(request, "/api/control/missions", {
+    title: `api-e2e-mission-bad-backend-${Date.now()}`,
+    workspace_id: suite.hostWorkspace.id,
+    backend: "google",
+  });
+  expectStatus(badBackendRes, [400], "POST /api/control/missions (unknown backend)");
 
   expectStatus(await apiGet(request, `/api/control/missions/${mission.id}`), [200], "GET mission");
   expectStatus(

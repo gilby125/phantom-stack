@@ -29,6 +29,79 @@ use std::sync::Arc;
 use crate::ai_providers::{AuthMethod, PendingOAuth, ProviderType};
 use crate::util::{home_dir, internal_error, strip_jsonc_comments, AI_PROVIDERS_PATH};
 
+fn provider_allowed_backends(provider_type: ProviderType) -> &'static [&'static str] {
+    match provider_type {
+        ProviderType::Anthropic => &["opencode", "claudecode"],
+        ProviderType::OpenAI => &["opencode", "codex"],
+        ProviderType::Google => &["opencode", "gemini"],
+        ProviderType::Amp => &["amp"],
+        ProviderType::OpenCode => &["opencode"],
+        // Everything else is currently only usable via OpenCode.
+        _ => &["opencode"],
+    }
+}
+
+async fn validate_use_for_backends(
+    state: &super::routes::AppState,
+    provider_type: ProviderType,
+    backends: &[String],
+) -> Result<(), String> {
+    if backends.is_empty() {
+        return Err("use_for_backends must include at least one backend".to_string());
+    }
+
+    let allowed = provider_allowed_backends(provider_type);
+    let allowed_set: std::collections::HashSet<&str> = allowed.iter().copied().collect();
+
+    let mut seen = std::collections::HashSet::<String>::new();
+    for backend in backends {
+        let trimmed = backend.trim();
+        if trimmed.is_empty() {
+            return Err("use_for_backends cannot contain empty backend ids".to_string());
+        }
+        if !seen.insert(trimmed.to_string()) {
+            return Err(format!("use_for_backends contains duplicate backend id '{}'", trimmed));
+        }
+
+        // Validate backend exists in registry (fail fast, no aliasing).
+        {
+            let registry = state.backend_registry.read().await;
+            if registry.get(trimmed).is_none() {
+                return Err(format!(
+                    "Unknown backend '{}'. Supported backends: {}",
+                    trimmed,
+                    registry
+                        .list()
+                        .into_iter()
+                        .map(|b| b.id)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+
+        if !allowed_set.contains(trimmed) {
+            let hint = if trimmed == provider_type.id() {
+                format!(
+                    " (note: '{}' is a provider id, not a backend id)",
+                    provider_type.id()
+                )
+            } else {
+                "".to_string()
+            };
+            return Err(format!(
+                "Invalid backend '{}' for {} provider{}. Allowed: {}",
+                trimmed,
+                provider_type.display_name(),
+                hint,
+                allowed.join(", ")
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 /// Anthropic OAuth client ID (from opencode-anthropic-auth plugin)
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ANTHROPIC_CONSOLE_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
@@ -5493,6 +5566,10 @@ async fn create_provider(
         .clone()
         .unwrap_or_else(|| default_backends_for_provider(provider_type));
 
+    validate_use_for_backends(&state, provider_type, &use_for_backends)
+        .await
+        .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+
     let mut provider = crate::ai_providers::AIProvider::new(provider_type, req.name.clone());
     provider.label = req.label.clone();
     provider.priority = req.priority.unwrap_or(0);
@@ -5587,6 +5664,7 @@ async fn update_provider(
 
     let uuid = existing.id;
     let mut updated = existing.clone();
+    let provider_type = existing.provider_type;
     if let Some(name) = req.name {
         updated.name = name;
     }
@@ -5609,6 +5687,9 @@ async fn update_provider(
         updated.api_key = api_key_update;
     }
     if let Some(ref backends) = req.use_for_backends {
+        validate_use_for_backends(&state, provider_type, backends)
+            .await
+            .map_err(|e| (StatusCode::BAD_REQUEST, e))?;
         updated.use_for_backends = Some(backends.clone());
     }
 
@@ -6043,6 +6124,9 @@ async fn oauth_callback(
             if let Some(provider_type) = ProviderType::from_id(&provider_type_id) {
                 let backends = use_for_backends
                     .unwrap_or_else(|| default_backends_for_provider(provider_type));
+                if let Err(e) = validate_use_for_backends(&state, provider_type, &backends).await {
+                    return (StatusCode::BAD_REQUEST, e).into_response();
+                }
 
                 // Read the credentials that oauth_callback_inner just wrote to auth.json
                 let auth = read_opencode_auth().unwrap_or_default();
