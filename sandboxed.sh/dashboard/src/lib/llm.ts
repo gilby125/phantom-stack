@@ -3,7 +3,8 @@
  * Used by dashboard UX features (auto-title generation, etc.).
  */
 
-import { readLLMConfig } from "./llm-settings";
+import { getActiveLLMProvider, readLLMConfig, type LLMProviderConfig } from "./llm-settings";
+import { apiFetch } from "./api/core";
 
 interface ChatMessage {
   role: "system" | "user" | "assistant";
@@ -18,6 +19,15 @@ interface ChatCompletionResponse {
   choices: ChatCompletionChoice[];
 }
 
+interface DashboardChatCompletionRequest {
+  base_url: string;
+  api_key: string;
+  model: string;
+  messages: ChatMessage[];
+  max_tokens?: number;
+  temperature?: number;
+}
+
 export interface LLMConnectionTestResult {
   ok: boolean;
   content?: string;
@@ -30,29 +40,27 @@ export interface LLMConnectionTestResult {
  */
 async function chatCompletion(
   messages: ChatMessage[],
-  options?: { maxTokens?: number }
+  options?: { maxTokens?: number },
+  provider?: LLMProviderConfig | null
 ): Promise<string | null> {
-  const cfg = readLLMConfig();
+  const cfg = provider ?? getActiveLLMProvider() ?? readLLMConfig();
   const apiKey = cfg.apiKey.trim();
   const baseUrl = cfg.baseUrl.trim();
   const model = cfg.model.trim();
   if (!cfg.enabled || !apiKey || !baseUrl || !model) return null;
 
-  const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
-
   try {
-    const res = await fetch(url, {
+    const res = await apiFetch("/api/dashboard-llm/chat-completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        base_url: baseUrl,
+        api_key: apiKey,
         model,
         messages,
         max_tokens: options?.maxTokens ?? 60,
         temperature: 0.3,
-      }),
+      } satisfies DashboardChatCompletionRequest),
     });
 
     if (!res.ok) {
@@ -75,8 +83,8 @@ async function chatCompletion(
  * Runs a direct probe against the configured provider and returns a detailed result.
  * Used by the settings page so connection failures can show actionable errors.
  */
-export async function testLLMConnection(): Promise<LLMConnectionTestResult> {
-  const cfg = readLLMConfig();
+export async function testLLMConnection(provider?: LLMProviderConfig | null): Promise<LLMConnectionTestResult> {
+  const cfg = provider ?? getActiveLLMProvider() ?? readLLMConfig();
   const apiKey = cfg.apiKey.trim();
   const baseUrl = cfg.baseUrl.trim();
   const model = cfg.model.trim();
@@ -85,20 +93,18 @@ export async function testLLMConnection(): Promise<LLMConnectionTestResult> {
   if (!baseUrl) return { ok: false, error: "Base URL is empty" };
   if (!model) return { ok: false, error: "Model is empty" };
 
-  const url = `${baseUrl.replace(/\/+$/, "")}/chat/completions`;
   try {
-    const res = await fetch(url, {
+    const res = await apiFetch("/api/dashboard-llm/chat-completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
+        base_url: baseUrl,
+        api_key: apiKey,
         model,
         messages: [{ role: "user", content: "Return exactly: OK" }],
         max_tokens: 64,
         temperature: 0.3,
-      }),
+      } satisfies DashboardChatCompletionRequest),
     });
 
     if (!res.ok) {
@@ -126,7 +132,8 @@ export async function testLLMConnection(): Promise<LLMConnectionTestResult> {
  */
 export async function generateMissionTitle(
   userMessage: string,
-  assistantReply: string
+  assistantReply: string,
+  provider?: LLMProviderConfig | null
 ): Promise<string | null> {
   const trimmedUser = userMessage.slice(0, 800);
   const trimmedAssistant = assistantReply.slice(0, 800);
@@ -144,6 +151,7 @@ export async function generateMissionTitle(
         content: `User request:\n${trimmedUser}\n\nAssistant response:\n${trimmedAssistant}`,
       },
     ],
-    { maxTokens: 30 }
+    { maxTokens: 30 },
+    provider
   );
 }

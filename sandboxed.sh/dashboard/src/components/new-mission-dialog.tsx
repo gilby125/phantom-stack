@@ -57,6 +57,9 @@ interface CombinedAgent {
   value: string; // "backend:agent" format
 }
 
+const KNOWN_BACKEND_IDS = ['opencode', 'claudecode', 'amp', 'codex', 'gemini'] as const;
+type KnownBackendId = typeof KNOWN_BACKEND_IDS[number];
+
 // Parse agent names from API response
 const parseAgentNames = (payload: unknown): string[] => {
   const normalizeEntry = (entry: unknown): string | null => {
@@ -92,6 +95,29 @@ const parseAgentNamesFromSettings = (settings: Record<string, unknown> | null | 
     return Object.keys(agents as Record<string, unknown>);
   }
   return [];
+};
+
+const isBackendAvailable = (
+  backendId: string,
+  config: { enabled?: boolean; cli_available?: boolean } | undefined
+): boolean => {
+  if (!KNOWN_BACKEND_IDS.includes(backendId as KnownBackendId)) {
+    return true;
+  }
+  return config?.enabled !== false && config?.cli_available !== false;
+};
+
+const fallbackAgentsByBackend: Record<Exclude<KnownBackendId, 'opencode' | 'claudecode'>, BackendAgent[]> = {
+  amp: [
+    { id: 'smart', name: 'Smart Mode' },
+    { id: 'rush', name: 'Rush Mode' },
+  ],
+  codex: [
+    { id: 'default', name: 'Codex Agent' },
+  ],
+  gemini: [
+    { id: 'default', name: 'Gemini Agent' },
+  ],
 };
 
 export function NewMissionDialog({
@@ -144,6 +170,17 @@ export function NewMissionDialog({
     dedupingInterval: 30000,
   });
 
+  const backendConfigs = useMemo(
+    () => ({
+      opencode: opencodeConfig,
+      claudecode: claudecodeConfig,
+      amp: ampConfig,
+      codex: codexConfig,
+      gemini: geminiConfig,
+    }),
+    [opencodeConfig, claudecodeConfig, ampConfig, codexConfig, geminiConfig]
+  );
+
   const { data: providersResponse } = useSWR(
     'model-providers',
     () => listProviders({ includeAll: true }),
@@ -157,25 +194,10 @@ export function NewMissionDialog({
 
   // Filter to only enabled backends with CLI available
   const enabledBackends = useMemo(() => {
-    return backends?.filter((b) => {
-      if (b.id === 'opencode') {
-        return opencodeConfig?.enabled !== false && opencodeConfig?.cli_available !== false;
-      }
-      if (b.id === 'claudecode') {
-        return claudecodeConfig?.enabled !== false && claudecodeConfig?.cli_available !== false;
-      }
-      if (b.id === 'amp') {
-        return ampConfig?.enabled !== false && ampConfig?.cli_available !== false;
-      }
-      if (b.id === 'codex') {
-        return codexConfig?.enabled !== false && codexConfig?.cli_available !== false;
-      }
-      if (b.id === 'gemini') {
-        return geminiConfig?.enabled !== false && geminiConfig?.cli_available !== false;
-      }
-      return true;
-    }) || [];
-  }, [backends, opencodeConfig, claudecodeConfig, ampConfig, codexConfig, geminiConfig]);
+    return backends?.filter((backend) =>
+      isBackendAvailable(backend.id, backendConfigs[backend.id as KnownBackendId])
+    ) || [];
+  }, [backends, backendConfigs]);
 
   // SWR: fetch agents for each enabled backend
   const { data: opencodeAgents, mutate: mutateOpencodeAgents } = useSWR<BackendAgent[]>(
@@ -202,6 +224,17 @@ export function NewMissionDialog({
     enabledBackends.some(b => b.id === 'gemini') ? 'backend-gemini-agents' : null,
     () => listBackendAgents('gemini'),
     { revalidateOnFocus: true, dedupingInterval: 5000 }
+  );
+
+  const backendAgents = useMemo(
+    () => ({
+      opencode: opencodeAgents,
+      claudecode: claudecodeAgents,
+      amp: ampAgents,
+      codex: codexAgents,
+      gemini: geminiAgents,
+    }),
+    [opencodeAgents, claudecodeAgents, ampAgents, codexAgents, geminiAgents]
   );
 
   // SWR: fallback for opencode agents
@@ -272,24 +305,11 @@ export function NewMissionDialog({
 
       } else if (backend.id === 'claudecode') {
         // Filter out hidden Claude Code agents by name
-        const allClaudeAgents = claudecodeAgents || [];
+        const allClaudeAgents = backendAgents.claudecode || [];
         agents = allClaudeAgents.filter(a => !claudeCodeHiddenAgents.includes(a.name));
-      } else if (backend.id === 'amp') {
-        // Amp has built-in modes: smart and rush
-        agents = ampAgents || [
-          { id: 'smart', name: 'Smart Mode' },
-          { id: 'rush', name: 'Rush Mode' },
-        ];
-      } else if (backend.id === 'codex') {
-        // Codex agents
-        agents = codexAgents || [
-          { id: 'default', name: 'Codex Agent' },
-        ];
-      } else if (backend.id === 'gemini') {
-        // Gemini agents
-        agents = geminiAgents || [
-          { id: 'default', name: 'Gemini Agent' },
-        ];
+      } else if (backend.id in fallbackAgentsByBackend) {
+        const backendId = backend.id as keyof typeof fallbackAgentsByBackend;
+        agents = backendAgents[backendId] || fallbackAgentsByBackend[backendId];
       }
 
       // Use agent.id for CLI value, agent.name for display (consistent across all backends)
@@ -305,7 +325,7 @@ export function NewMissionDialog({
     }
 
     return result;
-  }, [enabledBackends, opencodeAgents, opencodeProfileAgentNames, claudecodeAgents, ampAgents, codexAgents, geminiAgents, agentsPayload, config, claudeCodeLibConfig]);
+  }, [enabledBackends, opencodeAgents, opencodeProfileAgentNames, backendAgents, agentsPayload, config, claudeCodeLibConfig]);
 
   // Group agents by backend for display
   const agentsByBackend = useMemo(() => {

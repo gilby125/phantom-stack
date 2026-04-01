@@ -50,6 +50,7 @@ use super::backends as backends_api;
 use super::claudecode as claudecode_api;
 use super::console;
 use super::control;
+use super::dashboard_llm;
 use super::deferred_proxy as deferred_proxy_api;
 use super::desktop;
 use super::desktop_stream;
@@ -753,6 +754,10 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .route(
             "/api/backends/:id/config",
             axum::routing::put(backends_api::update_backend_config),
+        )
+        .route(
+            "/api/dashboard-llm/chat-completions",
+            post(dashboard_llm::chat_completions),
         )
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
