@@ -7,6 +7,7 @@
 //! - supports frontend/interactive tools by accepting tool results
 //! - supports persistent missions (goal-oriented sessions)
 
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
@@ -40,6 +41,7 @@ use super::mission_store::{
     self, create_mission_store, now_string, Mission, MissionHistoryEntry, MissionStore,
     MissionStoreType, StoredEvent,
 };
+use crate::ai_providers::SharedAIProviderStore;
 use super::routes::AppState;
 
 /// Returns a safe index to truncate a string at, ensuring we don't cut UTF-8 characters.
@@ -3067,6 +3069,8 @@ pub struct ControlState {
     pub mission_store: Arc<dyn MissionStore>,
     /// Cache for semantic mission search results keyed by normalized query hash
     pub mission_search_cache: Arc<RwLock<HashMap<u64, MissionSearchCacheEntry>>>,
+    /// AI Providers (for dynamic execution routing)
+    pub ai_providers: SharedAIProviderStore,
 }
 
 /// Control session manager for per-user sessions.
@@ -3078,12 +3082,14 @@ pub struct ControlHub {
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,
+    ai_providers: SharedAIProviderStore,
     secrets: Option<Arc<SecretsStore>>,
 }
 
 impl ControlHub {
     pub fn new(
         config: Config,
+        ai_providers: SharedAIProviderStore,
         root_agent: AgentRef,
         mcp: Arc<McpRegistry>,
         workspaces: workspace::SharedWorkspaceStore,
@@ -3093,6 +3099,7 @@ impl ControlHub {
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config,
+            ai_providers,
             root_agent,
             mcp,
             workspaces,
@@ -3135,6 +3142,7 @@ impl ControlHub {
 
         let state = spawn_control_session(
             self.config.clone(),
+            self.ai_providers.clone(),
             Arc::clone(&self.root_agent),
             Arc::clone(&self.mcp),
             Arc::clone(&self.workspaces),
@@ -3895,7 +3903,7 @@ pub async fn create_mission(
     // 1. Use explicit config_profile from request if provided
     // 2. Otherwise use workspace's config_profile
     // 3. Fall back to "default"
-    let effective_config_profile = if let Some(ref profile) = config_profile {
+        let effective_config_profile = if let Some(ref profile) = config_profile {
         Some(profile.clone())
     } else if let Some(ws_id) = workspace_id {
         state
@@ -3908,14 +3916,35 @@ pub async fn create_mission(
     };
 
     // Validate agent exists before creating mission (fail fast with clear error)
-    // Skip validation for Claude Code, Amp, Codex, and Gemini - they have their own built-in agents
-    if let Some(ref agent_name) = agent {
-        let backend_id = backend.as_deref();
-        let skip_validation = matches!(backend_id, Some("claudecode" | "amp" | "codex" | "gemini"));
-        if !skip_validation {
+    if let Some(ref agent_id) = agent {
+        let mut is_valid = false;
+
+        // 1. Check if it's a 'hooked up' AI Provider (UUID check)
+        if let Ok(uuid) = uuid::Uuid::parse_str(agent_id) {
+            let providers = state.ai_providers.list().await;
+            if providers.iter().any(|p| p.id == uuid && p.enabled) {
+                is_valid = true;
+            }
+        }
+
+        if !is_valid {
+            let backend_id = backend.as_deref().unwrap_or("opencode");
+            let registry = state.backend_registry.read().await;
+            if let Some(backend_impl) = registry.get(backend_id) {
+                // 2. Check if it's a native agent for this backend
+                if let Ok(native_agents) = backend_impl.list_agents().await {
+                    if native_agents.iter().any(|a| a.id == *agent_id) {
+                        is_valid = true;
+                    }
+                }
+            }
+        }
+
+        // 3. Fall back to library validation (skills, etc)
+        if !is_valid {
             super::library::validate_agent_exists(
                 &state,
-                agent_name,
+                agent_id,
                 effective_config_profile.as_deref(),
             )
             .await
@@ -4542,6 +4571,7 @@ pub async fn stream(
 /// Spawn the global control session actor.
 fn spawn_control_session(
     config: Config,
+    ai_providers: SharedAIProviderStore,
     root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
@@ -4582,11 +4612,13 @@ fn spawn_control_session(
         max_parallel,
         mission_store: Arc::clone(&mission_store),
         mission_search_cache,
+        ai_providers,
     };
 
     // Spawn the main control actor
     tokio::spawn(control_actor_loop(
         config.clone(),
+        state.ai_providers.clone(),
         root_agent,
         mcp,
         workspaces.clone(),
@@ -5653,6 +5685,7 @@ async fn agent_finished_automation_messages(
 )]
 async fn control_actor_loop(
     config: Config,
+    ai_providers: SharedAIProviderStore,
     root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
@@ -6051,6 +6084,7 @@ async fn control_actor_loop(
                                     // Try to start if not already running
                                     if !runner.is_running() {
                                         runner.start_next(
+                                            ai_providers.clone(),
                                             config.clone(),
                                             Arc::clone(&root_agent),
                                             Arc::clone(&mcp),
@@ -6147,6 +6181,7 @@ async fn control_actor_loop(
                                             });
                                             // Start execution
                                             runner.start_next(
+                                                ai_providers.clone(),
                                                 config.clone(),
                                                 Arc::clone(&root_agent),
                                                 Arc::clone(&mcp),
@@ -6370,7 +6405,7 @@ async fn control_actor_loop(
                                 )
                                     .await;
 
-                                let cfg = config.clone();
+                                let _cfg = config.clone();
                                 let agent = Arc::clone(&root_agent);
                                 let mcp_ref = Arc::clone(&mcp);
                                 let workspaces_ref = Arc::clone(&workspaces);
@@ -6450,12 +6485,15 @@ async fn control_actor_loop(
                                 running_cancel = Some(cancel.clone());
                                 running_mission_id = mission_id;
                                 // Reset activity tracking when new task starts
+                                let providers = ai_providers.clone();
+                                let config_copy = config.clone();
                                 main_runner_last_activity = std::time::Instant::now();
                                 main_runner_activity = None;
                                 main_runner_subtasks.clear();
                                 running = Some(tokio::spawn(async move {
                                     let result = run_single_control_turn(
-                                        cfg,
+                                        providers,
+                                        config_copy,
                                         agent,
                                         mcp_ref,
                                         workspaces_ref,
@@ -6469,13 +6507,13 @@ async fn control_actor_loop(
                                         Some(mission_ctrl),
                                         tree_ref,
                                         progress_ref,
-                                        mission_id,
                                         workspace_id,
-                                        backend_id,
+                                        mission_id,
                                         model_override,
                                         model_effort,
                                         agent_override,
                                         session_id,
+                                        backend_id,
                                         false, // force_session_resume: regular message, not a resume
                                         mission_config_profile,
                                     )
@@ -6709,6 +6747,7 @@ async fn control_actor_loop(
 
                             // Start execution
                             let started = runner.start_next(
+                                ai_providers.clone(),
                                 config.clone(),
                                 Arc::clone(&root_agent),
                                 Arc::clone(&mcp),
@@ -6962,7 +7001,7 @@ async fn control_actor_loop(
                                             Some(target_mid),
                                         ).await;
                                         let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: Some(target_mid) });
-                                        let cfg = config.clone();
+                                        let _cfg = config.clone();
                                         let agent = Arc::clone(&root_agent);
                                         let mcp_ref = Arc::clone(&mcp);
                                         let workspaces_ref = Arc::clone(&workspaces);
@@ -6990,11 +7029,13 @@ async fn control_actor_loop(
                                         // Capture which mission this task is working on (the resumed mission)
                                         running_mission_id = Some(mission_id);
                                         // Reset activity tracking so stall detection starts fresh
+                                        let providers = ai_providers.clone();
                                         main_runner_last_activity = std::time::Instant::now();
                                         main_runner_activity = None;
                                         main_runner_subtasks.clear();
                                         running = Some(tokio::spawn(async move {
                                             let result = run_single_control_turn(
+                                                providers,
                                                 cfg,
                                                 agent,
                                                 mcp_ref,
@@ -7009,13 +7050,13 @@ async fn control_actor_loop(
                                                 Some(mission_ctrl),
                                                 tree_ref,
                                                 progress_ref,
-                                                Some(mission_id),
                                                 workspace_id,
-                                                backend_id,
+                                                Some(mission_id),
                                                 model_override,
                                                 model_effort,
                                                 agent_override,
                                                 session_id,
+                                                backend_id,
                                                 true, // force_session_resume: this is a resume operation
                                                 mission_config_profile,
                                             )
@@ -7572,7 +7613,7 @@ async fn control_actor_loop(
                     )
                         .await;
 
-                    let cfg = config.clone();
+                    let _cfg = config.clone();
                     let agent = Arc::clone(&root_agent);
                     let mcp_ref = Arc::clone(&mcp);
                     let workspaces_ref = Arc::clone(&workspaces);
@@ -7626,12 +7667,15 @@ async fn control_actor_loop(
                     let agent_override = per_msg_agent.or(mission_agent);
                     running_mission_id = mission_id;
                     // Reset activity tracking when new task starts
+                    let providers = ai_providers.clone();
+                    let config_copy = config.clone();
                     main_runner_last_activity = std::time::Instant::now();
                     main_runner_activity = None;
                     main_runner_subtasks.clear();
                     running = Some(tokio::spawn(async move {
                         let result = run_single_control_turn(
-                            cfg,
+                            providers,
+                            config_copy,
                             agent,
                             mcp_ref,
                             workspaces_ref,
@@ -7645,13 +7689,13 @@ async fn control_actor_loop(
                             Some(mission_ctrl),
                             tree_ref,
                             progress_ref,
-                            mission_id,
                             workspace_id,
-                            backend_id,
+                            mission_id,
                             model_override,
                             model_effort,
                             agent_override,
                             session_id,
+                            backend_id,
                             false, // force_session_resume: continuation turn, not a resume
                             mission_config_profile,
                         )
@@ -7817,6 +7861,7 @@ async fn control_actor_loop(
                                     }
                                 }
                                 let started = runner.start_next(
+                                    ai_providers.clone(),
                                     config.clone(),
                                     Arc::clone(&root_agent),
                                     Arc::clone(&mcp),
@@ -8213,6 +8258,7 @@ async fn control_actor_loop(
 
 #[allow(clippy::too_many_arguments)]
 async fn run_single_control_turn(
+    ai_providers: SharedAIProviderStore,
     mut config: Config,
     _root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
@@ -8360,9 +8406,20 @@ async fn run_single_control_turn(
     let fallback_workspace = workspace::Workspace::default_host(config.working_dir.clone());
     let exec_workspace = runtime_workspace.as_ref().unwrap_or(&fallback_workspace);
 
-    // Execute based on backend
-    let result = match backend_id.as_deref() {
-        Some("claudecode") => {
+    // Resolve dynamic backend from hooked-up provider if agent is a UUID
+    let mut effective_backend = Cow::Borrowed(backend_id.as_deref().unwrap_or("claudecode"));
+    if let Some(ref agent_id) = agent_override {
+        if let Ok(uuid) = uuid::Uuid::parse_str(agent_id) {
+            let providers = ai_providers.list().await;
+            if let Some(provider) = providers.iter().find(|p| p.id == uuid) {
+                effective_backend = Cow::Owned(provider.provider_type.id().to_string());
+            }
+        }
+    }
+
+    // Execute based on resolved backend
+    let result = match effective_backend.as_ref() {
+        "claudecode" => {
             let mid = match require_mission_id(mission_id, "Claude Code", &events_tx) {
                 Ok(id) => id,
                 Err(r) => return r,
@@ -8508,7 +8565,7 @@ async fn run_single_control_turn(
 
             result
         }
-        Some("amp") => {
+        "amp" => {
             let mid = match require_mission_id(mission_id, "Amp", &events_tx) {
                 Ok(id) => id,
                 Err(r) => return r,
@@ -8531,7 +8588,7 @@ async fn run_single_control_turn(
             ))
             .await
         }
-        Some("codex") => {
+        "codex" => {
             let mid = match require_mission_id(mission_id, "Codex", &events_tx) {
                 Ok(id) => id,
                 Err(r) => return r,
@@ -8584,7 +8641,7 @@ async fn run_single_control_turn(
 
             result
         }
-        Some("gemini") => {
+        "gemini" => {
             let mid = match require_mission_id(mission_id, "Gemini CLI", &events_tx) {
                 Ok(id) => id,
                 Err(r) => return r,
@@ -8603,7 +8660,7 @@ async fn run_single_control_turn(
             ))
             .await
         }
-        Some(backend) if backend != "opencode" => {
+        backend if backend != "opencode" => {
             let _ = events_tx.send(AgentEvent::Error {
                 message: format!("Unsupported backend: {}", backend),
                 mission_id,

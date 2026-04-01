@@ -96,16 +96,35 @@ impl Backend for OpenCodeBackend {
     }
 
     async fn list_agents(&self) -> Result<Vec<AgentInfo>, Error> {
+        let mut agents = vec![
+            AgentInfo {
+                id: "Sisyphus".to_string(),
+                name: "Sisyphus".to_string(),
+            },
+            AgentInfo {
+                id: "default".to_string(),
+                name: "OpenCode".to_string(),
+            },
+        ];
+
         match self.fetch_agents().await {
-            Ok(payload) => Ok(Self::parse_agents(payload)),
+            Ok(payload) => {
+                let fetched = Self::parse_agents(payload);
+                for f in fetched {
+                    if !agents.iter().any(|a| a.id == f.id) {
+                        agents.push(f);
+                    }
+                }
+            }
             Err(err) => {
-                tracing::warn!(
-                    "OpenCode /agent unavailable ({}). Returning empty agent list.",
+                // Only log at debug level if fetch fails, as this is expected for local use
+                tracing::debug!(
+                    "OpenCode /agent unavailable ({}). Using default agents.",
                     err
                 );
-                Ok(vec![])
             }
         }
+        Ok(agents)
     }
 
     async fn create_session(&self, config: SessionConfig) -> Result<Session, Error> {

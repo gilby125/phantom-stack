@@ -388,6 +388,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     // Spawn the single global control session actor.
     let control_state = control::ControlHub::new(
         config.clone(),
+        ai_providers.clone(),
         Arc::clone(&root_agent),
         Arc::clone(&mcp),
         Arc::clone(&workspaces),

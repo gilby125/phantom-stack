@@ -38,6 +38,7 @@ use super::control::{
     resolve_claudecode_default_model, resolve_gemini_default_model, safe_truncate_index,
     AgentEvent, AgentTreeNode, ControlRunState, ControlStatus, ExecutionProgress, FrontendToolHub,
 };
+use crate::ai_providers::SharedAIProviderStore;
 use super::library::SharedLibrary;
 
 #[derive(Debug, Default)]
@@ -1526,6 +1527,7 @@ impl MissionRunner {
     #[allow(clippy::too_many_arguments)]
     pub fn start_next(
         &mut self,
+        ai_providers: SharedAIProviderStore,
         config: Config,
         root_agent: AgentRef,
         mcp: Arc<McpRegistry>,
@@ -1593,6 +1595,7 @@ impl MissionRunner {
 
         let handle = tokio::spawn(async move {
             let result = run_mission_turn(
+                ai_providers.clone(),
                 config,
                 root_agent,
                 mcp,
@@ -1911,6 +1914,7 @@ pub(crate) fn claudecode_resume_current_session_message() -> &'static str {
 /// Execute a single turn for a mission.
 #[allow(clippy::too_many_arguments)]
 async fn run_mission_turn(
+    ai_providers: SharedAIProviderStore,
     config: Config,
     _root_agent: AgentRef,
     mcp: Arc<McpRegistry>,
@@ -2171,12 +2175,32 @@ async fn run_mission_turn(
         );
     }
 
-    // Execute based on backend
+    // Execute based on backend (with dynamic routing for hooked-up providers)
+    let mut effective_backend = Cow::Borrowed(backend_id.as_str());
+    
+    // Resolve dynamic backend from hooked-up provider if agent is a UUID
+    if let Some(ref agent_id) = effective_agent {
+        if let Ok(uuid) = uuid::Uuid::parse_str(agent_id) {
+            let providers = ai_providers.list().await;
+            if let Some(provider) = providers.iter().find(|p| p.id == uuid) {
+                let resolved = provider.provider_type.id();
+                tracing::info!(
+                    mission_id = %mission_id,
+                    provider_name = %provider.name,
+                    provider_type = %resolved,
+                    "Routing mission to dynamic provider backend"
+                );
+                effective_backend = Cow::Borrowed(resolved);
+            }
+        }
+    }
+
+    // Execute based on resolved backend
     // For Claude Code, check if this is a continuation turn (has prior assistant response).
     // Note: history may include the current user message before the turn runs,
     // so we check for assistant messages to determine if this is truly a continuation.
     let is_continuation = history.iter().any(|(role, _)| role == "assistant");
-    let result = match backend_id.as_str() {
+    let result = match effective_backend.as_ref() {
         "claudecode" => {
             // Track the effective message and session used for the most recent
             // attempt, so account rotation uses the right context (e.g. after
