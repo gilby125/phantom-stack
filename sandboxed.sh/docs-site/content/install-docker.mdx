@@ -10,9 +10,9 @@ Docker is the fastest way to run Open Agent locally or on a server. The Docker i
 ## Quick Start
 
 ```bash
-git clone https://github.com/Th0rgal/openagent.git
-cd openagent
-cp .env.example .env
+git clone <this-repo>
+cd phantom-stack
+cp sandboxed.sh/.env.example .env
 # Edit .env — set DASHBOARD_PASSWORD and JWT_SECRET
 docker compose up -d
 ```
@@ -34,7 +34,7 @@ Optional but common:
 
 ## Container Workspaces (systemd-nspawn)
 
-To enable isolated container workspaces, uncomment the privileged settings in `docker-compose.yml`:
+To enable isolated container workspaces, uncomment the privileged settings in the repo-root `docker-compose.yml`:
 
 ```yaml
 services:

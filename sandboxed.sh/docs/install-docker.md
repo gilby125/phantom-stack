@@ -10,9 +10,9 @@ Docker is the easiest way to run sandboxed.sh (formerly Open Agent). One command
 ## Quick Start
 
 ```bash
-git clone https://github.com/Th0rgal/sandboxed-sh.git
-cd sandboxed.sh
-cp .env.example .env
+git clone <this-repo>
+cd phantom-stack
+cp sandboxed.sh/.env.example .env
 # Edit .env — at minimum, set DASHBOARD_PASSWORD and JWT_SECRET
 docker compose up -d
 ```
@@ -54,7 +54,7 @@ Copy `.env.example` to `.env` and configure the values below. The full file cont
 
 ### Enabling container workspaces
 
-By default, workspaces run in host/fallback mode — processes execute directly inside the Docker container. To enable full **systemd-nspawn isolation** (each workspace gets its own lightweight container), edit `docker-compose.yml` and uncomment the privileged lines:
+By default, workspaces run in host/fallback mode — processes execute directly inside the Docker container. To enable full **systemd-nspawn isolation** (each workspace gets its own lightweight container), edit the repo-root `docker-compose.yml` and uncomment the privileged lines:
 
 ```yaml
 services:
@@ -117,7 +117,7 @@ The multi-stage build produces a single image with everything pre-installed:
 
 The Docker image serves HTTP on port 80. For production with TLS, use an external reverse proxy:
 
-1. **Bind to localhost only** — change the port mapping in `docker-compose.yml`:
+1. **Bind to localhost only** — change the port mapping in the repo-root `docker-compose.yml`:
    ```yaml
    ports:
      - "127.0.0.1:3000:80"
@@ -142,7 +142,7 @@ The Docker image includes the Next.js dashboard, but you can also:
 ## Updating
 
 ```bash
-cd sandboxed.sh
+cd phantom-stack
 git pull
 docker compose build
 docker compose up -d
@@ -152,9 +152,9 @@ docker compose up -d
 
 | Problem | Fix |
 |---|---|
-| Container workspaces not working | Uncomment `privileged: true` and `cgroup: host` in `docker-compose.yml` |
+| Container workspaces not working | Uncomment `privileged: true` and `cgroup: host` in the repo-root `docker-compose.yml` |
 | Permission denied on SSH keys | Ensure `~/.ssh` on the host is readable by your user |
-| Port conflict on 3000 | Change the port mapping (e.g. `"8080:80"`) in `docker-compose.yml` |
+| Port conflict on 3000 | Change the port mapping (e.g. `"8080:80"`) in the repo-root `docker-compose.yml` |
 | Build takes too long | Rust compilation is the bottleneck (~5–10 min first time). Subsequent builds use Docker layer caching. |
 | Backend not starting | Check logs with `docker compose logs -f sandboxed.sh` |
 

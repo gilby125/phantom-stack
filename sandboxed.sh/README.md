@@ -128,17 +128,20 @@ isolation, and Library-based configuration management.
 ### Docker (recommended for most users)
 
 ```bash
-git clone https://github.com/Th0rgal/sandboxed.sh.git
-cd sandboxed.sh
-cp .env.example .env
+git clone <this-repo>
+cd phantom-stack
+cp sandboxed.sh/.env.example .env
 # Edit .env with your settings
 docker compose up -d
 ```
 
 Open `http://localhost:3000` — that's it.
 
-For container workspace isolation (recommended), uncomment `privileged: true` in
-`docker-compose.yml`.
+Run Docker Compose from the repo root. The single supported Compose entrypoint is
+the root `docker-compose.yml`.
+
+For container workspace isolation (recommended), use the `privileged: true`
+setting in the repo-root `docker-compose.yml`.
 
 → **[Full Docker setup guide](docs/install-docker.md)**
 

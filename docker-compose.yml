@@ -7,7 +7,6 @@ volumes:
   ollama_data:
   sandboxed_data:
   claude_auth:
-    name: claude-auth
 
 services:
   sandboxed:

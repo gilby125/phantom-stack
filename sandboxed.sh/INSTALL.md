@@ -9,9 +9,9 @@ One command gets you a complete environment on any OS (Linux, macOS, Windows).
 → **[Docker installation guide](docs/install-docker.md)**
 
 ```bash
-git clone https://github.com/Th0rgal/sandboxed-sh.git
-cd sandboxed-sh
-cp .env.example .env
+git clone <this-repo>
+cd phantom-stack
+cp sandboxed.sh/.env.example .env
 docker compose up -d
 ```
 
