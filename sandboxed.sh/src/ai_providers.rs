@@ -105,6 +105,7 @@ pub enum ProviderType {
     Zai,
     Minimax,
     Amp,
+    #[serde(rename = "opencode")]
     OpenCode,
     Custom,
 }
