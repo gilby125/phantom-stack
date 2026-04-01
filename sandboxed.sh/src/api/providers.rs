@@ -45,6 +45,7 @@ pub const DEFAULT_CATALOG_PROVIDER_IDS: &[&str] = &[
     "cerebras",
     "zai",
     "minimax",
+    "opencode",
 ];
 
 /// A model available from a provider.
@@ -617,6 +618,19 @@ fn default_providers_config() -> ProvidersConfig {
                         id: "MiniMax-M2".to_string(),
                         name: "MiniMax M2".to_string(),
                         description: Some("Fast and economical".to_string()),
+                    },
+                ],
+            },
+            Provider {
+                id: "opencode".to_string(),
+                name: "OpenCode (Local)".to_string(),
+                billing: "free".to_string(),
+                description: "Local inference engine".to_string(),
+                models: vec![
+                    ProviderModel {
+                        id: "opencode-agent".to_string(),
+                        name: "OpenCode Agent".to_string(),
+                        description: Some("Default agentic model".to_string()),
                     },
                 ],
             },
