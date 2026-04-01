@@ -23,6 +23,13 @@ pub struct BackendResponse {
     /// Whether the CLI for this backend is available on the system
     #[serde(default)]
     pub cli_available: bool,
+    /// Whether required provider credentials are configured for this backend.
+    /// Present for backends that require provider/API auth to run missions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_configured: Option<bool>,
+    /// Whether this backend is actually runnable for missions right now.
+    #[serde(default)]
+    pub runnable: bool,
     /// Only present for backends that support API-key gating in the UI (e.g. Claude Code).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key_configured: Option<bool>,
@@ -70,6 +77,82 @@ fn cli_available_for_backend(backend_id: &str, settings: &serde_json::Value) -> 
     }
 }
 
+fn provider_targets_backend_entry(provider: &crate::ai_providers::AIProvider, backend_id: &str) -> bool {
+    let targets = provider
+        .use_for_backends
+        .clone()
+        .unwrap_or_else(|| crate::api::ai_providers::default_backends_for_provider(provider.provider_type));
+    targets.into_iter().any(|b| b == backend_id)
+}
+
+fn has_nonempty_env(var: &str) -> bool {
+    std::env::var(var)
+        .ok()
+        .map(|v| !v.trim().is_empty())
+        .unwrap_or(false)
+}
+
+async fn provider_configured_for_backend(
+    state: &Arc<AppState>,
+    backend_id: &str,
+    settings: &serde_json::Value,
+) -> Option<bool> {
+    match backend_id {
+        "claudecode" => Some(
+            crate::api::ai_providers::get_anthropic_auth_for_claudecode(&state.config.working_dir)
+                .is_some(),
+        ),
+        "codex" => Some(
+            crate::api::ai_providers::get_openai_api_key_for_codex_default(&state.config.working_dir)
+                .is_some()
+                || crate::api::ai_providers::read_openai_oauth_access_token().is_some(),
+        ),
+        "gemini" => {
+            let provider_targets = crate::api::ai_providers::provider_targets_backend(
+                &state.config.working_dir,
+                crate::ai_providers::ProviderType::Google,
+                "gemini",
+            );
+
+            let store_has_google = state
+                .ai_providers
+                .get_all_by_type(crate::ai_providers::ProviderType::Google)
+                .await
+                .into_iter()
+                .any(|provider| {
+                    provider.enabled
+                        && provider_targets_backend_entry(&provider, "gemini")
+                        && (provider.api_key.is_some() || provider.oauth.is_some())
+                });
+
+            let env_has_google = has_nonempty_env("GEMINI_API_KEY")
+                || has_nonempty_env("GOOGLE_API_KEY")
+                || has_nonempty_env("GOOGLE_GENERATIVE_AI_API_KEY");
+
+            Some((provider_targets && store_has_google) || env_has_google)
+        }
+        "amp" => {
+            let configured = settings
+                .get("api_key")
+                .and_then(|v| v.as_str())
+                .map(|s| !s.is_empty() && !s.starts_with("[REDACTED") && s != "********")
+                .unwrap_or(false);
+            Some(configured)
+        }
+        "opencode" => {
+            // OpenCode needs at least one enabled provider target with usable credentials.
+            // OpenCode local provider is considered credential-ready by has_credentials().
+            let has_targeted_provider = state.ai_providers.list().await.into_iter().any(|provider| {
+                provider.enabled
+                    && provider_targets_backend_entry(&provider, "opencode")
+                    && provider.has_credentials()
+            });
+            Some(has_targeted_provider)
+        }
+        _ => None,
+    }
+}
+
 /// List all available backends
 pub async fn list_backends(
     State(state): State<Arc<AppState>>,
@@ -89,6 +172,11 @@ pub async fn list_backends(
             .unwrap_or_else(|| serde_json::json!({}));
 
         let cli_available = cli_available_for_backend(&info.id, &settings);
+        let provider_configured =
+            provider_configured_for_backend(&state, &info.id, &settings).await;
+        let runnable = enabled
+            && cli_available
+            && provider_configured.unwrap_or(true);
 
         let api_key_configured = if info.id == "claudecode" {
             let configured = if let Some(store) = state.secrets.as_ref() {
@@ -109,6 +197,8 @@ pub async fn list_backends(
             name: info.name,
             enabled,
             cli_available,
+            provider_configured,
+            runnable,
             api_key_configured,
         });
     }
@@ -134,6 +224,11 @@ pub async fn get_backend(
                 .map(|e| e.settings.clone())
                 .unwrap_or_else(|| serde_json::json!({}));
             let cli_available = cli_available_for_backend(&id, &settings);
+            let provider_configured =
+                provider_configured_for_backend(&state, &id, &settings).await;
+            let runnable = enabled
+                && cli_available
+                && provider_configured.unwrap_or(true);
 
             let api_key_configured = if id == "claudecode" {
                 let configured = if let Some(store) = state.secrets.as_ref() {
@@ -154,6 +249,8 @@ pub async fn get_backend(
                 name: backend.name().to_string(),
                 enabled,
                 cli_available,
+                provider_configured,
+                runnable,
                 api_key_configured,
             }))
         }

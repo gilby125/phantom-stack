@@ -95,7 +95,9 @@ const parseAgentNamesFromSettings = (settings: Record<string, unknown> | null | 
 };
 
 const isBackendAvailable = (backend: Backend): boolean =>
-  backend.enabled !== false && backend.cli_available !== false;
+  typeof backend.runnable === 'boolean'
+    ? backend.runnable
+    : backend.enabled !== false && backend.cli_available !== false;
 
 const fallbackAgentsByBackend: Record<string, BackendAgent[]> = {
   amp: [

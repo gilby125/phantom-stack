@@ -2456,6 +2456,10 @@ export interface Backend {
   enabled?: boolean;
   /** Whether the CLI for this backend is available on the system */
   cli_available?: boolean;
+  /** Whether required provider credentials are configured for this backend */
+  provider_configured?: boolean;
+  /** Whether this backend is runnable right now (enabled + CLI + credentials) */
+  runnable?: boolean;
   /** Only present for some backends (e.g. claudecode) */
   api_key_configured?: boolean;
 }
