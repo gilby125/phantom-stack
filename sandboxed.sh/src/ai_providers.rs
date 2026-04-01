@@ -105,6 +105,7 @@ pub enum ProviderType {
     Zai,
     Minimax,
     Amp,
+    OpenCode,
     Custom,
 }
 
@@ -129,6 +130,7 @@ impl ProviderType {
             Self::Zai => "Z.AI",
             Self::Minimax => "Minimax",
             Self::Amp => "Amp",
+            Self::OpenCode => "OpenCode",
             Self::Custom => "Custom",
         }
     }
@@ -153,6 +155,7 @@ impl ProviderType {
             Self::Zai => "zai",
             Self::Minimax => "minimax",
             Self::Amp => "amp",
+            Self::OpenCode => "opencode",
             Self::Custom => "custom",
         }
     }
@@ -178,6 +181,7 @@ impl ProviderType {
             "zai" => Some(Self::Zai),
             "minimax" => Some(Self::Minimax),
             "amp" => Some(Self::Amp),
+            "opencode" => Some(Self::OpenCode),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -203,6 +207,7 @@ impl ProviderType {
             Self::Zai => Some("ZHIPU_API_KEY"),
             Self::Minimax => Some("MINIMAX_API_KEY"),
             Self::Amp => Some("AMP_API_KEY"),
+            Self::OpenCode => None,
             Self::Custom => None,
         }
     }
@@ -273,6 +278,15 @@ impl ProviderType {
                     description: Some("Enter an existing Google AI API key".to_string()),
                 },
             ],
+                label: "API Key".to_string(),
+                method_type: AuthMethodType::Api,
+                description: None,
+            }],
+            Self::OpenCode => vec![AuthMethod {
+                label: "Local Service (No Login Required)".to_string(),
+                method_type: AuthMethodType::Api,
+                description: Some("Connect directly to your local OpenCode v1.3.11 engine".to_string()),
+            }],
             _ => vec![AuthMethod {
                 label: "API Key".to_string(),
                 method_type: AuthMethodType::Api,
@@ -392,6 +406,7 @@ impl AIProvider {
         self.api_key.is_some()
             || self.oauth.is_some()
             || (self.provider_type == ProviderType::Custom && self.base_url.is_some())
+            || self.provider_type == ProviderType::OpenCode
     }
 
     /// Check if this provider has OAuth credentials.

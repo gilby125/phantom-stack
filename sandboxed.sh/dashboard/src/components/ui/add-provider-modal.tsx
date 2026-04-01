@@ -28,6 +28,7 @@ const providerIcons: Record<string, string> = {
   zai: '⚡',
   minimax: 'M',
   amp: 'A',
+  opencode: '💠',
   custom: '🔧',
 };
 
@@ -65,6 +66,15 @@ const getProviderAuthMethods = (providerType: AIProviderType): AIProviderAuthMet
         description: 'Use your Gemini plan/quotas (including free tier) via Google OAuth',
       },
       { label: 'Enter API Key', type: 'api', description: 'Use an existing Google AI API key' },
+    ];
+  }
+  if (providerType === 'opencode') {
+    return [
+      {
+        label: 'Local Service (No Login Required)',
+        type: 'api',
+        description: 'Connect directly to your local OpenCode engine',
+      },
     ];
   }
   return [];
@@ -144,6 +154,24 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
     }
   }, [open, loading]);
 
+  const handleAutoSubmitOpenCode = async () => {
+    setLoading(true);
+    try {
+      await createAIProvider({
+        provider_type: 'opencode' as AIProviderType,
+        name: 'OpenCode (Local)',
+        use_for_backends: ['opencode'],
+      });
+      toast.success('OpenCode provider added');
+      onSuccess();
+      onClose();
+    } catch (err) {
+      toast.error(`Failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleClose = async () => {
     onClose();
   };
@@ -179,6 +207,9 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
     } else if (providerType === 'anthropic' || providerType === 'openai' || providerType === 'google') {
       // Providers with backend targeting go to backend selection even without OAuth
       setStep('select-backends');
+    } else if (providerType === 'opencode') {
+      // OpenCode is instant
+      handleAutoSubmitOpenCode();
     } else {
       // Otherwise go directly to API key entry
       setStep('enter-api-key');

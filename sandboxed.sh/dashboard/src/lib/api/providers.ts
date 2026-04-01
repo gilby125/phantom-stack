@@ -27,6 +27,7 @@ export type AIProviderType =
   | "minimax"
   | "github-copilot"
   | "amp"
+  | "opencode"
   | "custom";
 
 export interface AIProviderTypeInfo {
