@@ -298,9 +298,8 @@ export function AddProviderModal({ open, onClose, onSuccess, providerTypes }: Ad
     try {
       await createAIProvider({
         provider_type: selectedProvider,
-        name: accountLabel.trim()
-          ? `${selectedTypeInfo?.name || selectedProvider} (${accountLabel.trim()})`
-          : selectedTypeInfo?.name || selectedProvider,
+        // Keep canonical provider name stable; store account disambiguation in `label`.
+        name: selectedTypeInfo?.name || selectedProvider,
         label: accountLabel.trim() || undefined,
         api_key: apiKey,
         use_for_backends: selectedBackends,

@@ -617,9 +617,10 @@ export default function ProvidersPage() {
                           <div className="flex-1 min-w-0">
                             <span className="text-sm text-white/80 truncate block">
                               {provider.name}
-                              {provider.label && (
-                                <span className="ml-1.5 text-xs text-white/40">({provider.label})</span>
-                              )}
+                              {provider.label &&
+                                !provider.name.includes(`(${provider.label})`) && (
+                                  <span className="ml-1.5 text-xs text-white/40">({provider.label})</span>
+                                )}
                             </span>
                             {provider.account_email && (
                               <span className="text-[11px] text-white/35 truncate block">

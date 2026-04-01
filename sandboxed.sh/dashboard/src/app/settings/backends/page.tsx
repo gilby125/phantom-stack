@@ -19,7 +19,9 @@ import { getRuntimeApiBase, writeSavedSettings } from '@/lib/settings';
 import { ServerConnectionCard } from '@/components/server-connection-card';
 
 export default function BackendsPage() {
-  const [activeBackendTab, setActiveBackendTab] = useState<'opencode' | 'claudecode' | 'amp'>('opencode');
+  const [activeBackendTab, setActiveBackendTab] = useState<
+    'opencode' | 'claudecode' | 'amp' | 'codex' | 'gemini'
+  >('opencode');
   const [savingBackend, setSavingBackend] = useState(false);
   const [savingMissionLimit, setSavingMissionLimit] = useState(false);
   const [testingConnection, setTestingConnection] = useState(false);
@@ -81,6 +83,14 @@ export default function BackendsPage() {
     enabled: true,
     api_key: '',
   });
+  const [codexForm, setCodexForm] = useState({
+    cli_path: '',
+    enabled: true,
+  });
+  const [geminiForm, setGeminiForm] = useState({
+    cli_path: '',
+    enabled: true,
+  });
 
   // SWR: fetch backends
   const { data: backends = [] } = useSWR('backends', listBackends, {
@@ -104,6 +114,16 @@ export default function BackendsPage() {
   const { data: ampBackendConfig, mutate: mutateAmpBackend } = useSWR(
     'backend-amp-config',
     () => getBackendConfig('amp'),
+    { revalidateOnFocus: false }
+  );
+  const { data: codexBackendConfig, mutate: mutateCodexBackend } = useSWR(
+    'backend-codex-config',
+    () => getBackendConfig('codex'),
+    { revalidateOnFocus: false }
+  );
+  const { data: geminiBackendConfig, mutate: mutateGeminiBackend } = useSWR(
+    'backend-gemini-config',
+    () => getBackendConfig('gemini'),
     { revalidateOnFocus: false }
   );
 
@@ -147,6 +167,24 @@ export default function BackendsPage() {
       api_key: typeof settings.api_key === 'string' ? settings.api_key : '',
     });
   }, [ampBackendConfig]);
+
+  useEffect(() => {
+    if (!codexBackendConfig?.settings) return;
+    const settings = codexBackendConfig.settings as Record<string, unknown>;
+    setCodexForm({
+      cli_path: typeof settings.cli_path === 'string' ? settings.cli_path : '',
+      enabled: codexBackendConfig.enabled,
+    });
+  }, [codexBackendConfig]);
+
+  useEffect(() => {
+    if (!geminiBackendConfig?.settings) return;
+    const settings = geminiBackendConfig.settings as Record<string, unknown>;
+    setGeminiForm({
+      cli_path: typeof settings.cli_path === 'string' ? settings.cli_path : '',
+      enabled: geminiBackendConfig.enabled,
+    });
+  }, [geminiBackendConfig]);
 
   useEffect(() => {
     const limit = serverSettings?.max_parallel_missions;
@@ -252,6 +290,50 @@ export default function BackendsPage() {
     }
   };
 
+  const handleSaveCodexBackend = async () => {
+    setSavingBackend(true);
+    try {
+      const settings: Record<string, unknown> = {
+        cli_path: codexForm.cli_path || null,
+      };
+      const result = await updateBackendConfig('codex', settings, {
+        enabled: codexForm.enabled,
+      });
+      toast.success(result.message || 'Codex settings updated');
+      mutateCodexBackend();
+    } catch (err) {
+      toast.error(
+        `Failed to update Codex settings: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`
+      );
+    } finally {
+      setSavingBackend(false);
+    }
+  };
+
+  const handleSaveGeminiBackend = async () => {
+    setSavingBackend(true);
+    try {
+      const settings: Record<string, unknown> = {
+        cli_path: geminiForm.cli_path || null,
+      };
+      const result = await updateBackendConfig('gemini', settings, {
+        enabled: geminiForm.enabled,
+      });
+      toast.success(result.message || 'Gemini settings updated');
+      mutateGeminiBackend();
+    } catch (err) {
+      toast.error(
+        `Failed to update Gemini settings: ${
+          err instanceof Error ? err.message : 'Unknown error'
+        }`
+      );
+    } finally {
+      setSavingBackend(false);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col items-center p-6 overflow-auto">
       <div className="w-full max-w-xl space-y-6">
@@ -341,7 +423,7 @@ export default function BackendsPage() {
                 key={backend.id}
                 onClick={() =>
                   setActiveBackendTab(
-                    backend.id as 'opencode' | 'claudecode' | 'amp'
+                    backend.id as 'opencode' | 'claudecode' | 'amp' | 'codex' | 'gemini'
                   )
                 }
                 className={cn(
@@ -583,6 +665,92 @@ export default function BackendsPage() {
                     <Save className="h-3.5 w-3.5" />
                   )}
                   Save Amp
+                </button>
+              </div>
+            </div>
+          ) : activeBackendTab === 'codex' ? (
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-xs text-white/60 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={codexForm.enabled}
+                  onChange={(e) =>
+                    setCodexForm((prev) => ({ ...prev, enabled: e.target.checked }))
+                  }
+                  className="rounded border-white/20 cursor-pointer"
+                />
+                Enabled
+              </label>
+              <div>
+                <label className="block text-xs text-white/60 mb-1.5">CLI Path</label>
+                <input
+                  type="text"
+                  value={codexForm.cli_path || ''}
+                  onChange={(e) =>
+                    setCodexForm((prev) => ({ ...prev, cli_path: e.target.value }))
+                  }
+                  placeholder="codex (uses PATH) or /path/to/codex"
+                  className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                />
+                <p className="mt-1.5 text-xs text-white/30">
+                  Configure OpenAI provider credentials in AI Providers.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  onClick={handleSaveCodexBackend}
+                  disabled={savingBackend}
+                  className="flex items-center gap-2 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                >
+                  {savingBackend ? (
+                    <Loader className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" />
+                  )}
+                  Save Codex
+                </button>
+              </div>
+            </div>
+          ) : activeBackendTab === 'gemini' ? (
+            <div className="space-y-3">
+              <label className="flex items-center gap-2 text-xs text-white/60 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={geminiForm.enabled}
+                  onChange={(e) =>
+                    setGeminiForm((prev) => ({ ...prev, enabled: e.target.checked }))
+                  }
+                  className="rounded border-white/20 cursor-pointer"
+                />
+                Enabled
+              </label>
+              <div>
+                <label className="block text-xs text-white/60 mb-1.5">CLI Path</label>
+                <input
+                  type="text"
+                  value={geminiForm.cli_path || ''}
+                  onChange={(e) =>
+                    setGeminiForm((prev) => ({ ...prev, cli_path: e.target.value }))
+                  }
+                  placeholder="gemini (uses PATH) or /path/to/gemini"
+                  className="w-full rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2 text-sm text-white focus:outline-none focus:border-indigo-500/50"
+                />
+                <p className="mt-1.5 text-xs text-white/30">
+                  Configure Google provider credentials in AI Providers.
+                </p>
+              </div>
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  onClick={handleSaveGeminiBackend}
+                  disabled={savingBackend}
+                  className="flex items-center gap-2 rounded-lg bg-indigo-500 px-3 py-1.5 text-xs text-white hover:bg-indigo-600 transition-colors disabled:opacity-50"
+                >
+                  {savingBackend ? (
+                    <Loader className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Save className="h-3.5 w-3.5" />
+                  )}
+                  Save Gemini
                 </button>
               </div>
             </div>
