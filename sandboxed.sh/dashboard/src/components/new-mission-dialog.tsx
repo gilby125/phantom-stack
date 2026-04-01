@@ -443,16 +443,21 @@ export function NewMissionDialog({
       }
     }
 
-    // Fallback: use first available backend with priority claudecode → opencode → amp
-    // Try Claude Code first
-    const claudeCodeAgent = allAgents.find(a => a.backend === 'claudecode');
-    if (claudeCodeAgent) {
-      setSelectedAgentValue(claudeCodeAgent.value);
-      setDefaultSet(true);
-      return;
+    // Fallback: use first available backend with priority claudecode (if configured) → opencode → amp
+    // We prefer Claude Code if it has an API key or OAuth session, otherwise we prefer OpenCode
+    const isClaudeConfigured = claudecodeConfig?.settings?.api_key_configured === true;
+
+    // Try Claude Code if configured
+    if (isClaudeConfigured) {
+      const claudeCodeAgent = allAgents.find(a => a.backend === 'claudecode');
+      if (claudeCodeAgent) {
+        setSelectedAgentValue(claudeCodeAgent.value);
+        setDefaultSet(true);
+        return;
+      }
     }
 
-    // Try OpenCode second (prefer Sisyphus if available)
+    // Try OpenCode (prefer Sisyphus if available)
     const sisyphus = allAgents.find(a => a.backend === 'opencode' && a.agent === 'Sisyphus');
     if (sisyphus) {
       setSelectedAgentValue(sisyphus.value);
@@ -474,12 +479,22 @@ export function NewMissionDialog({
       return;
     }
 
+    // Fallback to Claude Code even if not configured (last resort)
+    if (!isClaudeConfigured) {
+      const claudeCodeAgent = allAgents.find(a => a.backend === 'claudecode');
+      if (claudeCodeAgent) {
+        setSelectedAgentValue(claudeCodeAgent.value);
+        setDefaultSet(true);
+        return;
+      }
+    }
+
     // Final fallback: use first available agent (shouldn't reach here)
     if (allAgents.length > 0) {
       setSelectedAgentValue(allAgents[0].value);
     }
     setDefaultSet(true);
-  }, [open, defaultSet, allAgents, config, initialValues]);
+  }, [open, defaultSet, allAgents, config, initialValues, claudecodeConfig]);
 
   useEffect(() => {
     if (selectedBackend === 'amp' && modelOverride) {
@@ -658,7 +673,7 @@ export function NewMissionDialog({
 
             {/* Agent selection (includes backend) */}
             <div>
-              <label className="block text-xs text-white/50 mb-1.5">Agent</label>
+              <label className="block text-xs text-white/50 mb-1.5">Agent & Backend</label>
               <select
                 value={selectedAgentValue}
                 onChange={(e) => setSelectedAgentValue(e.target.value)}
