@@ -278,10 +278,6 @@ impl ProviderType {
                     description: Some("Enter an existing Google AI API key".to_string()),
                 },
             ],
-                label: "API Key".to_string(),
-                method_type: AuthMethodType::Api,
-                description: None,
-            }],
             Self::OpenCode => vec![AuthMethod {
                 label: "Local Service (No Login Required)".to_string(),
                 method_type: AuthMethodType::Api,

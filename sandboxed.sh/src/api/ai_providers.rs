@@ -4411,6 +4411,12 @@ async fn list_provider_types() -> Json<Vec<ProviderTypeInfo>> {
             uses_oauth: false,
             env_var: Some("AMP_API_KEY".to_string()),
         },
+        ProviderTypeInfo {
+            id: "opencode".to_string(),
+            name: "OpenCode".to_string(),
+            uses_oauth: false,
+            env_var: None,
+        },
     ];
     Json(types)
 }
