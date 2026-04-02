@@ -35,7 +35,6 @@ pub mod mission_runner;
 pub mod mission_store;
 mod model_routing;
 mod monitoring;
-pub mod opencode;
 mod providers;
 mod proxy;
 mod proxy_keys;

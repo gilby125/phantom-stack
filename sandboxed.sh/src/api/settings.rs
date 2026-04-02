@@ -211,12 +211,6 @@ async fn reinitialize_library(state: &Arc<AppState>, remote: &str) -> Result<(),
 
     match crate::library::LibraryStore::new(library_path, remote).await {
         Ok(store) => {
-            // Sync OpenCode plugins
-            if let Ok(plugins) = store.get_plugins().await {
-                if let Err(e) = crate::opencode_config::sync_global_plugins(&plugins).await {
-                    tracing::warn!("Failed to sync OpenCode plugins: {}", e);
-                }
-            }
 
             tracing::info!("Configuration library reinitialized from {}", remote);
             let library = Arc::new(store);

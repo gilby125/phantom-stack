@@ -1,37 +1,28 @@
 //! # Open Agent Panel
 //!
-//! Cloud orchestrator for AI coding agents (Claude Code & OpenCode).
+//! Cloud orchestrator for AI coding agents (Claude Code, OpenCode, Codex).
 //!
 //! This library provides:
 //! - HTTP APIs for missions, workspaces, MCP tooling, and library sync
-//! - An OpenCode-backed agent wrapper for task delegation
+//! - Standardized backend wrappers for direct CLI execution
 //! - Streaming events for mission telemetry in the dashboards
 //!
-//! ## Architecture (OpenCode Backend)
+//! ## Architecture
 //!
-//! ```text
-//!        ┌──────────────────────────────────┐
-//!        │         OpenCodeAgent            │
-//!        │  (delegates to OpenCode server)  │
-//!        └────────────────┬─────────────────┘
-//!                         │
-//!                         ▼
-//!                ┌─────────────────┐
-//!                │  OpenCode       │
-//!                │  Server         │
-//!                └─────────────────┘
-//! ```
+//! The orchestrator spawns AI agent CLIs (like `opencode` or `claude`) as subprocesses
+//! within a sandboxed environment. It maps their NDJSON output streams to a unified
+//! `ExecutionEvent` protocol.
 //!
 //! ## Task Flow
 //! 1. Receive mission task via API
-//! 2. Delegate to OpenCode server
-//! 3. Stream real-time events (thinking, tool calls, results)
-//! 4. Store logs and return result
+//! 2. Spawn agent CLI subprocess
+//! 3. Stream real-time events (thinking, tool calls, results) via NDJSON
+//! 4. Store logs and return final result
 //!
 //! ## Modules
-//! - `agents`: OpenCodeAgent for task delegation
+//! - `agents`: Task execution abstractions
+//! - `backend`: Standardized agent CLI integrations
 //! - `task`: Task definitions and lightweight cost tracking
-//! - `opencode`: OpenCode API client
 
 pub mod agents;
 pub mod ai_providers;
@@ -43,8 +34,6 @@ pub mod cost;
 pub mod library;
 pub mod mcp;
 pub mod nspawn;
-pub mod opencode;
-pub mod opencode_config;
 pub mod pkg_manager;
 pub mod provider_health;
 pub mod secrets;
@@ -58,5 +47,4 @@ pub mod workspace_exec;
 
 pub use ai_providers::{AIProvider, AIProviderStore, ProviderType};
 pub use config::Config;
-pub use opencode_config::{OpenCodeConnection, OpenCodeStore};
 pub use settings::{Settings, SettingsStore};
