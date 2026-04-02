@@ -1,87 +1,27 @@
-mod client;
-
-use anyhow::{anyhow, Context, Error};
+use anyhow::Error;
 use async_trait::async_trait;
-use serde_json::Value;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
+use tracing::{debug, error, info};
 
 use crate::backend::events::ExecutionEvent;
+use crate::backend::shared::{convert_cli_event, CliEvent, ProcessHandle};
 use crate::backend::{AgentInfo, Backend, Session, SessionConfig};
-use client::OpenCodeClient;
 
 pub struct OpenCodeBackend {
     id: String,
     name: String,
-    client: OpenCodeClient,
 }
 
 impl OpenCodeBackend {
-    pub fn new(base_url: String, default_agent: Option<String>, permissive: bool) -> Self {
+    pub fn new() -> Self {
         Self {
             id: "opencode".to_string(),
             name: "OpenCode".to_string(),
-            client: OpenCodeClient::new(base_url, default_agent, permissive),
         }
-    }
-
-    pub fn client(&self) -> &OpenCodeClient {
-        &self.client
-    }
-
-    async fn fetch_agents(&self) -> Result<Value, Error> {
-        let base_url = self.client.base_url().trim_end_matches('/');
-        if base_url.is_empty() {
-            return Err(anyhow!("OpenCode base URL is not configured"));
-        }
-        let url = format!("{}/agent", base_url);
-        let resp = reqwest::Client::new()
-            .get(url)
-            .send()
-            .await
-            .context("Failed to call OpenCode /agent")?;
-        if !resp.status().is_success() {
-            let text = resp.text().await.unwrap_or_default();
-            return Err(anyhow!("OpenCode /agent failed: {}", text));
-        }
-        resp.json::<Value>()
-            .await
-            .context("Failed to parse OpenCode agent payload")
-    }
-
-    fn parse_agents(payload: Value) -> Vec<AgentInfo> {
-        let raw = match payload {
-            Value::Array(arr) => arr,
-            Value::Object(mut obj) => obj
-                .remove("agents")
-                .and_then(|v| v.as_array().cloned())
-                .unwrap_or_default(),
-            _ => Vec::new(),
-        };
-
-        raw.into_iter()
-            .filter_map(|entry| match entry {
-                Value::String(name) => Some(AgentInfo {
-                    id: name.clone(),
-                    name,
-                }),
-                Value::Object(mut obj) => {
-                    let name = obj
-                        .remove("name")
-                        .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        .or_else(|| {
-                            obj.remove("id")
-                                .and_then(|v| v.as_str().map(|s| s.to_string()))
-                        });
-                    name.map(|name| AgentInfo {
-                        id: name.clone(),
-                        name,
-                    })
-                }
-                _ => None,
-            })
-            .collect()
     }
 }
 
@@ -96,7 +36,9 @@ impl Backend for OpenCodeBackend {
     }
 
     async fn list_agents(&self) -> Result<Vec<AgentInfo>, Error> {
-        let mut agents = vec![
+        // OpenCode agents are managed via the CLI flags/config.
+        // We provide a set of standard identities.
+        Ok(vec![
             AgentInfo {
                 id: "Sisyphus".to_string(),
                 name: "Sisyphus".to_string(),
@@ -105,35 +47,14 @@ impl Backend for OpenCodeBackend {
                 id: "default".to_string(),
                 name: "OpenCode".to_string(),
             },
-        ];
-
-        match self.fetch_agents().await {
-            Ok(payload) => {
-                let fetched = Self::parse_agents(payload);
-                for f in fetched {
-                    if !agents.iter().any(|a| a.id == f.id) {
-                        agents.push(f);
-                    }
-                }
-            }
-            Err(err) => {
-                // Only log at debug level if fetch fails, as this is expected for local use
-                tracing::debug!(
-                    "OpenCode /agent unavailable ({}). Using default agents.",
-                    err
-                );
-            }
-        }
-        Ok(agents)
+        ])
     }
 
     async fn create_session(&self, config: SessionConfig) -> Result<Session, Error> {
-        let session = self
-            .client
-            .create_session(&config.directory, config.title.as_deref())
-            .await?;
+        // OpenCode handles session isolation via working directory.
+        // We use a generated UUID for tracking in our own DB.
         Ok(Session {
-            id: session.id,
+            id: uuid::Uuid::new_v4().to_string(),
             directory: config.directory,
             model: config.model,
             agent: config.agent,
@@ -145,27 +66,98 @@ impl Backend for OpenCodeBackend {
         session: &Session,
         message: &str,
     ) -> Result<(mpsc::Receiver<ExecutionEvent>, JoinHandle<()>), Error> {
-        let (rx, handle) = self
-            .client
-            .send_message_streaming(
-                &session.id,
-                &session.directory,
-                message,
-                session.model.as_deref(),
-                session.agent.as_deref(),
-            )
-            .await?;
+        let (event_tx, event_rx) = mpsc::channel(100);
+        let directory = session.directory.clone();
+        let model = session.model.clone();
+        let agent = session.agent.clone();
+        let message = message.to_string();
+
+        info!(
+            backend = "opencode",
+            session_id = %session.id,
+            "Starting OpenCode CLI mission"
+        );
+
         let join_handle = tokio::spawn(async move {
-            let _ = handle.await;
+            let mut args = vec!["--stream-json".to_string()];
+
+            if let Some(m) = model {
+                args.push("--model".to_string());
+                args.push(m);
+            }
+
+            if let Some(a) = agent {
+                args.push("--agent".to_string());
+                args.push(a);
+            }
+
+            // Always run in the session directory
+            args.push("--prompt".to_string());
+            args.push(message);
+
+            debug!("Executing: opencode {}", args.join(" "));
+
+            let mut child = match tokio::process::Command::new("opencode")
+                .args(&args)
+                .current_dir(&directory)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(e) => {
+                    error!("Failed to spawn opencode process: {}", e);
+                    let _ = event_tx
+                        .send(ExecutionEvent::Error {
+                            message: format!("Failed to spawn opencode: {}", e),
+                        })
+                        .await;
+                    return;
+                }
+            };
+
+            let stdout = child.stdout.take().unwrap();
+            let mut reader = BufReader::new(stdout).lines();
+            let child_arc = Arc::new(Mutex::new(Some(child)));
+            let mut pending_tools = HashMap::new();
+
+            // Track process in a handle so it can be killed if cancelled
+            let _handle = ProcessHandle::new(Arc::clone(&child_arc), tokio::spawn(async {}));
+
+            while let Ok(Some(line)) = reader.next_line().await {
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                match serde_json::from_str::<CliEvent>(&line) {
+                    Ok(cli_event) => {
+                        let events = convert_cli_event(cli_event, &mut pending_tools);
+                        for event in events {
+                            if event_tx.send(event).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to parse OpenCode NDJSON line: {} (line: {})", e, line);
+                    }
+                }
+            }
+
+            // Clean up
+            let child = {
+                let mut guard = child_arc.lock().await;
+                guard.take()
+            };
+            if let Some(mut child) = child {
+                let _ = child.wait().await;
+            }
         });
-        Ok((rx, join_handle))
+
+        Ok((event_rx, join_handle))
     }
 }
 
-pub fn registry_entry(
-    base_url: String,
-    default_agent: Option<String>,
-    permissive: bool,
-) -> Arc<dyn Backend> {
-    Arc::new(OpenCodeBackend::new(base_url, default_agent, permissive))
+pub fn registry_entry() -> Arc<dyn Backend> {
+    Arc::new(OpenCodeBackend::new())
 }

@@ -20,11 +20,11 @@ use tokio::sync::{broadcast, mpsc, OwnedSemaphorePermit, RwLock, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentRef, AgentResult, TerminalReason};
+use crate::agents::{AgentResult, TerminalReason};
 use crate::backend::claudecode::client::{ClaudeEvent, ContentBlock, StreamEvent};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
-use crate::opencode::{extract_reasoning, extract_text};
+use crate::backend::registry::BackendRegistry;
 use crate::secrets::SecretsStore;
 use crate::task::{extract_deliverables, DeliverableSet};
 use crate::util::{
@@ -511,6 +511,41 @@ fn extract_part_text<'a>(part: &'a serde_json::Value, part_type: &str) -> Option
         extract_str(part, &["thinking", "reasoning", "text", "content"])
     } else {
         extract_str(part, &["text", "content", "output_text"])
+    }
+}
+
+/// Extract all text segments from a list of message parts.
+fn extract_text(parts: &[serde_json::Value]) -> String {
+    let mut result = String::new();
+    for part_val in parts {
+        // Handle both raw part objects and wrapper objects with a "part" field
+        let part_obj = part_val.get("part").unwrap_or(part_val);
+        let part_type = part_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if let Some(text) = extract_part_text(part_obj, part_type) {
+            if !matches!(part_type, "thinking" | "reasoning") {
+                result.push_str(text);
+            }
+        }
+    }
+    result
+}
+
+/// Extract all reasoning/thinking segments from a list of message parts.
+fn extract_reasoning(parts: &[serde_json::Value]) -> Option<String> {
+    let mut result = String::new();
+    for part_val in parts {
+        let part_obj = part_val.get("part").unwrap_or(part_val);
+        let part_type = part_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if matches!(part_type, "thinking" | "reasoning") {
+            if let Some(text) = extract_part_text(part_obj, part_type) {
+                result.push_str(text);
+            }
+        }
+    }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
     }
 }
 
@@ -1529,7 +1564,7 @@ impl MissionRunner {
         &mut self,
         ai_providers: SharedAIProviderStore,
         config: Config,
-        root_agent: AgentRef,
+        backend_registry: Arc<RwLock<BackendRegistry>>,
         mcp: Arc<McpRegistry>,
         workspaces: workspace::SharedWorkspaceStore,
         library: SharedLibrary,
@@ -1597,7 +1632,7 @@ impl MissionRunner {
             let result = run_mission_turn(
                 ai_providers.clone(),
                 config,
-                root_agent,
+                backend_registry,
                 mcp,
                 workspaces,
                 library,
@@ -1916,7 +1951,7 @@ pub(crate) fn claudecode_resume_current_session_message() -> &'static str {
 async fn run_mission_turn(
     ai_providers: SharedAIProviderStore,
     config: Config,
-    _root_agent: AgentRef,
+    _backend_registry: Arc<RwLock<BackendRegistry>>,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,

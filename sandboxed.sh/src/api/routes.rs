@@ -1,6 +1,5 @@
 //! HTTP route handlers.
 
-use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -9,20 +8,15 @@ use axum::middleware;
 use axum::{
     extract::{DefaultBodyLimit, Extension, Path, Query, State},
     http::StatusCode,
-    response::{
-        sse::{Event, Sse},
-        Json,
-    },
+    response::Json,
     routing::{get, post},
     Router,
 };
-use futures::stream::Stream;
 use serde::Deserialize;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use uuid::Uuid;
 
-use crate::agents::{AgentContext, AgentRef, OpenCodeAgent};
 use crate::backend::registry::BackendRegistry;
 use crate::backend_config::BackendConfigEntry;
 use crate::config::{AuthMode, Config};
@@ -44,10 +38,8 @@ fn cli_available(name: &str) -> bool {
 use super::providers::ModelCatalog;
 
 use super::ai_providers as ai_providers_api;
-use super::ampcode as ampcode_api;
 use super::auth::{self, AuthUser};
 use super::backends as backends_api;
-use super::claudecode as claudecode_api;
 use super::console;
 use super::control;
 use super::dashboard_llm;
@@ -59,7 +51,6 @@ use super::library as library_api;
 use super::mcp as mcp_api;
 use super::model_routing as model_routing_api;
 use super::monitoring;
-use super::opencode as opencode_api;
 use super::proxy as proxy_api;
 use super::proxy_keys as proxy_keys_api;
 use super::secrets as secrets_api;
@@ -71,9 +62,8 @@ use super::workspaces as workspaces_api;
 /// Shared application state.
 pub struct AppState {
     pub config: Config,
-    pub tasks: RwLock<HashMap<String, HashMap<Uuid, TaskState>>>,
-    /// The agent used for task execution
-    pub root_agent: AgentRef,
+    /// Default backend ID to use for tasks
+    pub default_backend: String,
     /// Global interactive control session
     pub control: control::ControlHub,
     /// MCP server registry
@@ -82,10 +72,6 @@ pub struct AppState {
     pub library: library_api::SharedLibrary,
     /// Workspace store
     pub workspaces: workspace::SharedWorkspaceStore,
-    /// OpenCode connection store
-    pub opencode_connections: Arc<crate::opencode_config::OpenCodeStore>,
-    /// Cached OpenCode agent list
-    pub opencode_agents_cache: RwLock<opencode_api::OpenCodeAgentsCache>,
     /// AI Provider store
     pub ai_providers: Arc<crate::ai_providers::AIProviderStore>,
     /// Pending OAuth state for provider authorization
@@ -119,15 +105,13 @@ pub struct AppState {
 
 /// Start the HTTP server.
 pub async fn serve(config: Config) -> anyhow::Result<()> {
-    let mut config = config;
+    let config = config;
     // Start monitoring background collector early so clients get history immediately
     monitoring::init_monitoring();
 
     // Initialize MCP registry
     let mcp = Arc::new(McpRegistry::new(&config.working_dir).await);
-    if let Err(e) = crate::opencode_config::ensure_global_config(&mcp).await {
-        tracing::warn!("Failed to ensure OpenCode global config: {}", e);
-    }
+
     // Refresh all MCPs in background
     {
         let mcp_clone = Arc::clone(&mcp);
@@ -141,16 +125,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     // Enable per-container metrics collection in the monitoring background task
     monitoring::init_monitoring_workspaces(Arc::clone(&workspaces)).await;
-
-    // Initialize OpenCode connection store
-    let opencode_connections = Arc::new(
-        crate::opencode_config::OpenCodeStore::new(
-            config
-                .working_dir
-                .join(".sandboxed-sh/opencode_connections.json"),
-        )
-        .await,
-    );
 
     // Initialize AI provider store
     let ai_providers = Arc::new(
@@ -225,11 +199,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
             let mut entry = BackendConfigEntry::new(
                 "opencode",
                 "OpenCode",
-                serde_json::json!({
-                    "base_url": config.opencode_base_url,
-                    "default_agent": config.opencode_agent,
-                    "permissive": config.opencode_permissive,
-                }),
+                serde_json::json!({}),
             );
             entry.enabled = opencode_detected;
             entry
@@ -264,33 +234,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .await,
     );
 
-    // Apply persisted OpenCode settings (if present)
-    if let Some(entry) = backend_configs.get("opencode").await {
-        if let Some(settings) = entry.settings.as_object() {
-            if let Some(base_url) = settings.get("base_url").and_then(|v| v.as_str()) {
-                if !base_url.trim().is_empty() {
-                    config.opencode_base_url = base_url.to_string();
-                }
-            }
-            if let Some(agent) = settings.get("default_agent").and_then(|v| v.as_str()) {
-                if !agent.trim().is_empty() {
-                    config.opencode_agent = Some(agent.to_string());
-                }
-            }
-            if let Some(permissive) = settings.get("permissive").and_then(|v| v.as_bool()) {
-                config.opencode_permissive = permissive;
-            }
-        }
-    }
-
-    // Always use OpenCode backend
-    let root_agent: AgentRef = Arc::new(OpenCodeAgent::new(config.clone()));
-
-    // Initialize backend registry with OpenCode and Claude Code backends
-    let opencode_base_url = config.opencode_base_url.clone();
-    let opencode_default_agent = config.opencode_agent.clone();
-    let opencode_permissive = config.opencode_permissive;
-
     // Determine default backend: env var, or first available with priority claudecode → opencode → amp → gemini → codex
     let default_backend = config.default_backend.clone().unwrap_or_else(|| {
         if claude_detected {
@@ -323,11 +266,7 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
     );
 
     let mut backend_registry = BackendRegistry::new(default_backend);
-    backend_registry.register(crate::backend::opencode::registry_entry(
-        opencode_base_url.clone(),
-        opencode_default_agent,
-        opencode_permissive,
-    ));
+    backend_registry.register(crate::backend::opencode::registry_entry());
     backend_registry.register(crate::backend::claudecode::registry_entry());
     backend_registry.register(crate::backend::amp::registry_entry());
     backend_registry.register(crate::backend::codex::registry_entry());
@@ -349,12 +288,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         tokio::spawn(async move {
             match crate::library::LibraryStore::new(library_path, &library_remote).await {
                 Ok(store) => {
-                    if let Ok(plugins) = store.get_plugins().await {
-                        if let Err(e) = crate::opencode_config::sync_global_plugins(&plugins).await
-                        {
-                            tracing::warn!("Failed to sync OpenCode plugins: {}", e);
-                        }
-                    }
                     tracing::info!("Configuration library initialized from {}", library_remote);
                     *library_clone.write().await = Some(Arc::new(store));
 
@@ -386,11 +319,26 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         tracing::info!("Configuration library disabled (no remote configured)");
     }
 
+    // Calculate default backend
+    let default_backend = config.default_backend.clone().unwrap_or_else(|| {
+        if claude_detected {
+            "claudecode".to_string()
+        } else if opencode_detected {
+            "opencode".to_string()
+        } else if amp_detected {
+            "amp".to_string()
+        } else if gemini_detected {
+            "gemini".to_string()
+        } else {
+            "codex".to_string()
+        }
+    });
+
     // Spawn the single global control session actor.
-    let control_state = control::ControlHub::new(
+    let control = control::ControlHub::new(
         config.clone(),
         ai_providers.clone(),
-        Arc::clone(&root_agent),
+        Arc::clone(&backend_registry),
         Arc::clone(&mcp),
         Arc::clone(&workspaces),
         Arc::clone(&library),
@@ -399,14 +347,11 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     let state = Arc::new(AppState {
         config: config.clone(),
-        tasks: RwLock::new(HashMap::new()),
-        root_agent,
-        control: control_state,
+        default_backend,
+        control,
         mcp,
         library,
         workspaces,
-        opencode_connections,
-        opencode_agents_cache: RwLock::new(opencode_api::OpenCodeAgentsCache::default()),
         ai_providers,
         pending_oauth,
         secrets,
@@ -527,11 +472,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
 
     let protected_routes = Router::new()
         .route("/api/stats", get(get_stats))
-        .route("/api/task", post(create_task))
-        .route("/api/task/:id", get(get_task))
-        .route("/api/task/:id/stop", post(stop_task))
-        .route("/api/task/:id/stream", get(stream_task))
-        .route("/api/tasks", get(list_tasks))
         // Global control session endpoints
         .route("/api/control/message", post(control::post_message))
         .route("/api/control/tool_result", post(control::post_tool_result))
@@ -686,43 +626,6 @@ pub async fn serve(config: Config) -> anyhow::Result<()> {
         .nest("/api/library", library_api::routes())
         // Workspace management endpoints
         .nest("/api/workspaces", workspaces_api::routes())
-        // OpenCode connection endpoints
-        .nest("/api/opencode/connections", opencode_api::routes())
-        .route("/api/opencode/agents", get(opencode_api::list_agents))
-        // OpenCode settings (oh-my-opencode.json)
-        .route(
-            "/api/opencode/settings",
-            get(opencode_api::get_opencode_settings),
-        )
-        .route(
-            "/api/opencode/settings",
-            axum::routing::put(opencode_api::update_opencode_settings),
-        )
-        .route(
-            "/api/opencode/config",
-            get(opencode_api::get_opencode_config),
-        )
-        .route(
-            "/api/opencode/config",
-            axum::routing::put(opencode_api::update_opencode_config),
-        )
-        .route(
-            "/api/claudecode/config",
-            get(claudecode_api::get_claudecode_config),
-        )
-        .route(
-            "/api/claudecode/config",
-            axum::routing::put(claudecode_api::update_claudecode_config),
-        )
-        .route("/api/amp/config", get(ampcode_api::get_amp_config))
-        .route(
-            "/api/amp/config",
-            axum::routing::put(ampcode_api::update_amp_config),
-        )
-        .route(
-            "/api/opencode/restart",
-            post(opencode_api::restart_opencode_service),
-        )
         // AI Provider endpoints
         .nest("/api/ai/providers", ai_providers_api::routes())
         // Model routing (chains + health)
@@ -910,34 +813,6 @@ async fn get_stats(
     Extension(user): Extension<AuthUser>,
     Query(params): Query<StatsQuery>,
 ) -> Json<StatsResponse> {
-    // Legacy tasks
-    let tasks = state.tasks.read().await;
-    let user_tasks = tasks.get(&user.id);
-
-    let legacy_total = user_tasks.map(|t| t.len()).unwrap_or(0);
-    let legacy_active = user_tasks
-        .map(|t| {
-            t.values()
-                .filter(|s| s.status == TaskStatus::Running)
-                .count()
-        })
-        .unwrap_or(0);
-    let legacy_completed = user_tasks
-        .map(|t| {
-            t.values()
-                .filter(|s| s.status == TaskStatus::Completed)
-                .count()
-        })
-        .unwrap_or(0);
-    let legacy_failed = user_tasks
-        .map(|t| {
-            t.values()
-                .filter(|s| s.status == TaskStatus::Failed)
-                .count()
-        })
-        .unwrap_or(0);
-    drop(tasks);
-
     // Get mission stats from mission store
     let control_state = state.control.get_or_spawn(&user).await;
 
@@ -960,12 +835,6 @@ async fn get_stats(
         .iter()
         .filter(|m| m.status == super::control::MissionStatus::Failed)
         .count();
-
-    // Combine legacy tasks and missions
-    let total_tasks = legacy_total + mission_total;
-    let active_tasks = legacy_active + mission_active;
-    let completed_tasks = legacy_completed + mission_completed;
-    let failed_tasks = legacy_failed + mission_failed;
 
     // Get cost totals, optionally filtered by a time-range lower bound.
     let (total_cost_cents, actual_cost_cents, estimated_cost_cents, unknown_cost_cents) =
@@ -995,340 +864,25 @@ async fn get_stats(
             (total, a, e, u)
         };
 
-    let finished = completed_tasks + failed_tasks;
+    let finished = mission_completed + mission_failed;
     let success_rate = if finished > 0 {
-        completed_tasks as f64 / finished as f64
+        mission_completed as f64 / finished as f64
     } else {
         1.0
     };
 
     Json(StatsResponse {
-        total_tasks,
-        active_tasks,
-        completed_tasks,
-        failed_tasks,
+        total_tasks: mission_total,
+        active_tasks: mission_active,
+        completed_tasks: mission_completed,
+        failed_tasks: mission_failed,
         total_cost_cents,
         actual_cost_cents,
         estimated_cost_cents,
         unknown_cost_cents,
         success_rate,
     })
-}
-
-/// List all tasks.
-async fn list_tasks(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<AuthUser>,
-) -> Json<Vec<TaskState>> {
-    let tasks = state.tasks.read().await;
-    let mut task_list: Vec<_> = tasks
-        .get(&user.id)
-        .map(|t| t.values().cloned().collect())
-        .unwrap_or_default();
-    // Sort by most recent first (by ID since UUIDs are time-ordered)
-    task_list.sort_by_key(|task| Reverse(task.id));
-    Json(task_list)
-}
-
-/// Stop a running task.
-async fn stop_task(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<AuthUser>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut tasks = state.tasks.write().await;
-    let user_tasks = tasks.entry(user.id).or_default();
-
-    if let Some(task) = user_tasks.get_mut(&id) {
-        if task.status == TaskStatus::Running {
-            task.status = TaskStatus::Cancelled;
-            task.result = Some("Task was cancelled by user".to_string());
-            Ok(Json(serde_json::json!({
-                "success": true,
-                "message": "Task cancelled"
-            })))
-        } else {
-            Err((
-                StatusCode::BAD_REQUEST,
-                format!("Task {} is not running (status: {:?})", id, task.status),
-            ))
-        }
-    } else {
-        Err((StatusCode::NOT_FOUND, format!("Task {} not found", id)))
-    }
-}
-
-/// Create a new task.
-async fn create_task(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<AuthUser>,
-    Json(req): Json<CreateTaskRequest>,
-) -> Result<Json<CreateTaskResponse>, (StatusCode, String)> {
-    let id = Uuid::new_v4();
-    let model = req
-        .model
-        .or(state.config.default_model.clone())
-        .unwrap_or_default();
-
-    let task_state = TaskState {
-        id,
-        status: TaskStatus::Pending,
-        task: req.task.clone(),
-        model: model.clone(),
-        iterations: 0,
-        result: None,
-        log: Vec::new(),
-    };
-
-    // Store task
-    {
-        let mut tasks = state.tasks.write().await;
-        tasks
-            .entry(user.id.clone())
-            .or_default()
-            .insert(id, task_state);
-    }
-
-    // Spawn background task to run the agent
-    let state_clone = Arc::clone(&state);
-    let task_description = req.task.clone();
-    let budget_cents = req.budget_cents;
-    let working_dir = req.working_dir.map(std::path::PathBuf::from);
-
-    tokio::spawn(async move {
-        run_agent_task(
-            state_clone,
-            user.id,
-            id,
-            task_description,
-            model,
-            budget_cents,
-            working_dir,
-            None,
-        )
-        .await;
-    });
-
-    Ok(Json(CreateTaskResponse {
-        id,
-        status: TaskStatus::Pending,
-    }))
-}
-
-/// Run the agent for a task (background).
-#[allow(clippy::too_many_arguments)]
-async fn run_agent_task(
-    state: Arc<AppState>,
-    user_id: String,
-    task_id: Uuid,
-    task_description: String,
-    requested_model: String,
-    budget_cents: Option<u64>,
-    working_dir: Option<std::path::PathBuf>,
-    agent_override: Option<String>,
-) {
-    // Update status to running
-    {
-        let mut tasks = state.tasks.write().await;
-        if let Some(user_tasks) = tasks.get_mut(&user_id) {
-            if let Some(task_state) = user_tasks.get_mut(&task_id) {
-                task_state.status = TaskStatus::Running;
-            }
-        }
-    }
-
-    // Create a Task object for the OpenCode agent
-    let task_result = crate::task::Task::new(task_description.clone(), budget_cents.or(Some(1000)));
-
-    let mut task = match task_result {
-        Ok(t) => t,
-        Err(e) => {
-            let mut tasks = state.tasks.write().await;
-            if let Some(user_tasks) = tasks.get_mut(&user_id) {
-                if let Some(task_state) = user_tasks.get_mut(&task_id) {
-                    task_state.status = TaskStatus::Failed;
-                    task_state.result = Some(format!("Failed to create task: {}", e));
-                }
-            }
-            return;
-        }
-    };
-
-    // Set the user-requested model as minimum capability floor
-    if !requested_model.is_empty() {
-        task.analysis_mut().requested_model = Some(requested_model);
-    }
-
-    // Prepare workspace for this task (or use a provided custom dir)
-    let working_dir = if let Some(dir) = working_dir {
-        match workspace::prepare_custom_workspace(&state.config, &state.mcp, dir).await {
-            Ok(path) => path,
-            Err(e) => {
-                tracing::warn!("Failed to prepare custom workspace: {}", e);
-                state.config.working_dir.clone()
-            }
-        }
-    } else {
-        match workspace::prepare_task_workspace(&state.config, &state.mcp, task_id).await {
-            Ok(path) => path,
-            Err(e) => {
-                tracing::warn!("Failed to prepare task workspace: {}", e);
-                state.config.working_dir.clone()
-            }
-        }
-    };
-
-    let mut config = state.config.clone();
-    if let Some(agent) = agent_override {
-        config.opencode_agent = Some(agent);
-    }
-
-    // Create context with the specified working directory
-    let mut ctx = AgentContext::new(config, working_dir);
-    ctx.mcp = Some(Arc::clone(&state.mcp));
-
-    // Run the hierarchical agent
-    let result = state.root_agent.execute(&mut task, &ctx).await;
-
-    // Update task with result
-    {
-        let mut tasks = state.tasks.write().await;
-        if let Some(user_tasks) = tasks.get_mut(&user_id) {
-            if let Some(task_state) = user_tasks.get_mut(&task_id) {
-                // Extract iterations and tools from result data
-                // Note: RootAgent wraps executor data under "execution" field
-                if let Some(data) = &result.data {
-                    // Try to get execution data (may be nested under "execution" from RootAgent)
-                    let exec_data = data.get("execution").unwrap_or(data);
-
-                    // Update iterations count from execution signals
-                    if let Some(signals) = exec_data.get("execution_signals") {
-                        if let Some(iterations) = signals.get("iterations").and_then(|v| v.as_u64())
-                        {
-                            task_state.iterations = iterations as usize;
-                        }
-                    }
-
-                    // Add log entries for tools used
-                    if let Some(tools_used) = exec_data.get("tools_used") {
-                        if let Some(arr) = tools_used.as_array() {
-                            for tool in arr {
-                                task_state.log.push(TaskLogEntry {
-                                    timestamp: "0".to_string(),
-                                    entry_type: LogEntryType::ToolCall,
-                                    content: tool.as_str().unwrap_or("").to_string(),
-                                });
-                            }
-                        }
-                    }
-                }
-
-                // Add final response log
-                task_state.log.push(TaskLogEntry {
-                    timestamp: "0".to_string(),
-                    entry_type: LogEntryType::Response,
-                    content: result.output.clone(),
-                });
-
-                if result.success {
-                    task_state.status = TaskStatus::Completed;
-                    task_state.result = Some(result.output);
-                } else {
-                    task_state.status = TaskStatus::Failed;
-                    task_state.result = Some(format!("Error: {}", result.output));
-                }
-            }
-        }
-    }
-}
-
-/// Get task status and result.
-async fn get_task(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<AuthUser>,
-    Path(id): Path<Uuid>,
-) -> Result<Json<TaskState>, (StatusCode, String)> {
-    let tasks = state.tasks.read().await;
-    tasks
-        .get(&user.id)
-        .and_then(|t| t.get(&id).cloned())
-        .map(Json)
-        .ok_or_else(|| (StatusCode::NOT_FOUND, format!("Task {} not found", id)))
-}
-
-/// Stream task progress via SSE.
-async fn stream_task(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<AuthUser>,
-    Path(id): Path<Uuid>,
-) -> Result<Sse<impl Stream<Item = Result<Event, std::convert::Infallible>>>, (StatusCode, String)>
-{
-    // Check task exists
-    {
-        let tasks = state.tasks.read().await;
-        if !tasks
-            .get(&user.id)
-            .map(|t| t.contains_key(&id))
-            .unwrap_or(false)
-        {
-            return Err((StatusCode::NOT_FOUND, format!("Task {} not found", id)));
-        }
-    }
-
-    // Create a stream that polls task state
-    let stream = async_stream::stream! {
-        let mut last_log_len = 0;
-
-        loop {
-            let (status, log_entries, result) = {
-                let tasks = state.tasks.read().await;
-                let user_tasks = tasks.get(&user.id);
-                if let Some(task) = user_tasks.and_then(|t| t.get(&id)) {
-                    (task.status.clone(), task.log.clone(), task.result.clone())
-                } else {
-                    break;
-                }
-            };
-
-            // Send new log entries
-            for entry in log_entries.iter().skip(last_log_len) {
-                match Event::default().event("log").json_data(entry) {
-                    Ok(event) => yield Ok(event),
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to serialize task log SSE event");
-                    }
-                }
-            }
-            last_log_len = log_entries.len();
-
-            // Check if task is done
-            if matches!(
-                status,
-                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
-            ) {
-                match Event::default()
-                    .event("done")
-                    .json_data(serde_json::json!({
-                        "status": status,
-                        "result": result
-                    })) {
-                    Ok(event) => yield Ok(event),
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to serialize task done SSE event");
-                    }
-                }
-                break;
-            }
-
-            // Poll interval
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-    };
-
-    Ok(Sse::new(stream))
-}
-
-// ==================== Memory Endpoints (Stub - Memory Removed) ====================
+}// ==================== Memory Endpoints (Stub - Memory Removed) ====================
 
 /// Query parameters for listing runs.
 #[derive(Debug, Deserialize)]

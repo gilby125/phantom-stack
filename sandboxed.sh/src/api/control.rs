@@ -7058,7 +7058,7 @@ async fn control_actor_loop(
                                         ).await;
                                         let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: Some(target_mid) });
                                         let cfg = config.clone();
-                                        let agent_registry = Arc::clone(&backend_registry);
+                                        let backend_registry_ref = Arc::clone(&backend_registry);
                                         let mcp_ref = Arc::clone(&mcp);
                                         let workspaces_ref = Arc::clone(&workspaces);
                                         let library_ref = Arc::clone(&library);
@@ -7093,7 +7093,7 @@ async fn control_actor_loop(
                                             let result = run_single_control_turn(
                                                 providers,
                                                 cfg,
-                                                agent_registry,
+                                                backend_registry_ref,
                                                 mcp_ref,
                                                 workspaces_ref,
                                                 library_ref,

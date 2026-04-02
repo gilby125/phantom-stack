@@ -1,21 +1,16 @@
-//! Agents module - task execution via OpenCode.
+//! Agents module - task execution abstractions.
 //!
-//! # Agent Types
-//! - **OpenCodeAgent**: Delegates task execution to an OpenCode server
 
 mod context;
-mod opencode;
 mod types;
-
-use std::sync::Arc;
-
-pub use opencode::OpenCodeAgent;
 
 pub use context::AgentContext;
 pub use types::{AgentError, AgentId, AgentResult, AgentType, CostSource, TerminalReason};
 
 use crate::task::Task;
 use async_trait::async_trait;
+
+use std::sync::Arc;
 
 /// Reference to an agent (thread-safe shared pointer).
 pub type AgentRef = Arc<dyn Agent>;

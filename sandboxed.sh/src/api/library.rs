@@ -395,11 +395,6 @@ async fn sync_library_configs(
     state: &Arc<super::routes::AppState>,
     library: &LibraryStore,
 ) -> Result<(), (StatusCode, String)> {
-    // Sync plugins to global OpenCode config
-    let plugins = library.get_plugins().await.map_err(internal_error)?;
-    crate::opencode_config::sync_global_plugins(&plugins)
-        .await
-        .map_err(internal_error)?;
 
     // Sync OpenCode settings (oh-my-opencode.json) from Library to system
     if let Err(e) = workspace::sync_opencode_settings(library).await {
@@ -1442,10 +1437,25 @@ async fn get_visible_agents(
     // Read current config from working directory
     let config = workspace::read_sandboxed_config(&state.config.working_dir).await;
 
-    // Fetch all agents from OpenCode
-    let all_agents = crate::api::opencode::fetch_opencode_agents(&state)
-        .await
-        .map_err(internal_error)?;
+    // Fetch all agents from all backends
+    let mut all_agents_vec = Vec::new();
+    {
+        let registry = state.backend_registry.read().await;
+        for backend_info in registry.list() {
+            if let Some(backend) = registry.get(&backend_info.id) {
+                if let Ok(agents) = backend.list_agents().await {
+                    for agent in agents {
+                        all_agents_vec.push(serde_json::json!({
+                            "id": agent.id,
+                            "name": agent.name,
+                            "backend": backend_info.id,
+                        }));
+                    }
+                }
+            }
+        }
+    }
+    let all_agents = serde_json::Value::Array(all_agents_vec);
 
     let visible_agents = filter_visible_agents_with_fallback(all_agents.clone(), &config);
 
@@ -1531,21 +1541,25 @@ pub async fn validate_agent_exists(
     agent_name: &str,
     config_profile: Option<&str>,
 ) -> Result<(), String> {
-    // Fetch all agents from OpenCode (profile-aware when provided)
-    let all_agents = match crate::api::opencode::fetch_opencode_agents_for_profile(
-        state,
-        config_profile,
-    )
-    .await
+    // Fetch all agents from all backends
+    let mut all_agents_vec = Vec::new();
     {
-        Ok(agents) => agents,
-        Err(e) => {
-            // If we can't fetch agents, log warning but allow the request
-            // (OpenCode will validate at runtime)
-            tracing::warn!("Could not validate agent '{}': {}", agent_name, e);
-            return Ok(());
+        let registry = state.backend_registry.read().await;
+        for backend_info in registry.list() {
+            if let Some(backend) = registry.get(&backend_info.id) {
+                if let Ok(agents) = backend.list_agents().await {
+                    for agent in agents {
+                        all_agents_vec.push(serde_json::json!({
+                            "id": agent.id,
+                            "name": agent.name,
+                            "backend": backend_info.id,
+                        }));
+                    }
+                }
+            }
         }
-    };
+    }
+    let all_agents = serde_json::Value::Array(all_agents_vec);
 
     // Read config to get hidden agents list (profile-aware when provided)
     let config = if let Some(profile) = config_profile {
