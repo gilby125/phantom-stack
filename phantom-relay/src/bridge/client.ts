@@ -17,7 +17,7 @@ export class SandboxedClient {
     return { Authorization: `Bearer ${this.jwt}`, 'Content-Type': 'application/json' };
   }
 
-  async createMission(title: string, backend = 'opencode'): Promise<string> {
+  async createMission(title: string, backend?: string): Promise<string> {
     const res = await axios.post(`${this.baseUrl}/api/control/missions`, { title, backend }, { headers: this.h });
     return res.data.id as string;
   }

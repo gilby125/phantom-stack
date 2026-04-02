@@ -53,7 +53,8 @@ async function main() {
   const map = new ThreadMap();
   await map.init('./thread-map.sqlite');
 
-  const bridge = new RelayBridge(client, map, process.env.SANDBOXED_BACKEND || 'opencode');
+  const backend = process.env.SANDBOXED_BACKEND?.trim() || undefined;
+  const bridge = new RelayBridge(client, map, backend);
 
   if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
     startSlack(bridge);
