@@ -7,10 +7,10 @@
 //! - supports frontend/interactive tools by accepting tool results
 //! - supports persistent missions (goal-oriented sessions)
 
-use std::borrow::Cow;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::convert::Infallible;
 use std::hash::{Hash, Hasher};
+use std::path::{Component, Path as StdPath, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -27,12 +27,13 @@ use tokio::sync::{broadcast, mpsc, oneshot, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::agents::{AgentContext, AgentRef, TerminalReason};
+use crate::agents::{AgentContext, TerminalReason};
 use crate::config::Config;
 use crate::mcp::McpRegistry;
 use crate::secrets::SecretsStore;
 use crate::util::{build_history_context, internal_error};
 use crate::workspace;
+use crate::backend::registry::BackendRegistry;
 
 use super::auth::AuthUser;
 use super::desktop;
@@ -469,12 +470,12 @@ struct MetadataRefreshTaskRegistration {
 }
 
 static MISSION_METADATA_REFRESH_TASKS: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<Uuid, MetadataRefreshTaskEntry>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+    tokio::sync::Mutex<HashMap<Uuid, MetadataRefreshTaskEntry>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 static MISSION_METADATA_REFRESH_TASK_ID: AtomicU64 = AtomicU64::new(1);
 static MISSION_METADATA_REFRESH_BASELINES: std::sync::LazyLock<
-    std::sync::Mutex<HashMap<Uuid, usize>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+    tokio::sync::Mutex<HashMap<Uuid, usize>>,
+> = std::sync::LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 fn register_metadata_refresh_task(
     tasks: &mut HashMap<Uuid, MetadataRefreshTaskEntry>,
@@ -532,31 +533,23 @@ fn complete_metadata_refresh_task(
     }
 }
 
-fn clear_mission_metadata_refresh_state(mission_id: Uuid) {
+async fn clear_mission_metadata_refresh_state(mission_id: Uuid) {
     let stale_task = {
-        let mut tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
         tasks.remove(&mission_id)
     };
     if let Some(stale_task) = stale_task {
         stale_task.handle.abort();
     }
 
-    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
-        .lock()
-        .expect("metadata refresh baseline lock poisoned");
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES.lock().await;
     baselines.remove(&mission_id);
 }
 
 async fn clear_stale_mission_metadata_refresh_state(mission_store: &Arc<dyn MissionStore>) {
     let tracked_ids: std::collections::HashSet<Uuid> = {
-        let tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
-        let baselines = MISSION_METADATA_REFRESH_BASELINES
-            .lock()
-            .expect("metadata refresh baseline lock poisoned");
+        let tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
+        let baselines = MISSION_METADATA_REFRESH_BASELINES.lock().await;
 
         tasks.keys().chain(baselines.keys()).copied().collect()
     };
@@ -564,7 +557,7 @@ async fn clear_stale_mission_metadata_refresh_state(mission_store: &Arc<dyn Miss
     for mission_id in tracked_ids {
         match mission_store.get_mission(mission_id).await {
             Ok(Some(_)) => {}
-            Ok(None) => clear_mission_metadata_refresh_state(mission_id),
+            Ok(None) => clear_mission_metadata_refresh_state(mission_id).await,
             Err(err) => tracing::warn!(
                 "Failed to verify mission {} while clearing stale metadata refresh state: {}",
                 mission_id,
@@ -1690,15 +1683,11 @@ async fn apply_generated_mission_metadata_updates(
         return false;
     }
 
-    let _title_update_guard = if generated_title.is_some() {
-        Some(MISSION_TITLE_UPDATE_LOCK.lock().await)
+    let title_to_write = if generated_title.is_some() {
+        let _title_update_guard = MISSION_TITLE_UPDATE_LOCK.lock().await;
+        Some(disambiguate_generated_title(mission_store, mission_id, &generated_title.unwrap()).await)
     } else {
         None
-    };
-
-    let title_to_write = match generated_title {
-        Some(title) => Some(disambiguate_generated_title(mission_store, mission_id, &title).await),
-        None => None,
     };
 
     if let Err(err) = mission_store
@@ -1759,7 +1748,7 @@ fn conversational_message_count(history: &[(String, String)]) -> usize {
         .count()
 }
 
-fn should_refresh_metadata_by_cadence(
+async fn should_refresh_metadata_by_cadence(
     mission_id: Uuid,
     mission: &Mission,
     conversational_count: usize,
@@ -1772,9 +1761,7 @@ fn should_refresh_metadata_by_cadence(
         return false;
     }
 
-    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
-        .lock()
-        .expect("metadata refresh baseline lock poisoned");
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES.lock().await;
     let baseline = baselines.entry(mission_id).or_insert_with(|| {
         if mission.metadata_updated_at.is_some() {
             conversational_count
@@ -1791,20 +1778,18 @@ fn should_refresh_metadata_by_cadence(
     conversational_count.saturating_sub(*baseline) >= 10
 }
 
-fn record_metadata_refresh_baseline(mission_id: Uuid, conversational_count: usize) {
-    let mut baselines = MISSION_METADATA_REFRESH_BASELINES
-        .lock()
-        .expect("metadata refresh baseline lock poisoned");
+async fn record_metadata_refresh_baseline(mission_id: Uuid, conversational_count: usize) {
+    let mut baselines = MISSION_METADATA_REFRESH_BASELINES.lock().await;
     baselines.insert(mission_id, conversational_count);
 }
 
-fn record_metadata_refresh_baseline_from_mission(mission_id: Uuid, mission: &Mission) {
+async fn record_metadata_refresh_baseline_from_mission(mission_id: Uuid, mission: &Mission) {
     let conversational_count = mission
         .history
         .iter()
         .filter(|entry| entry.role == "user" || entry.role == "assistant")
         .count();
-    record_metadata_refresh_baseline(mission_id, conversational_count);
+    record_metadata_refresh_baseline(mission_id, conversational_count).await;
 }
 
 async fn persist_mission_history_and_schedule_metadata_refresh(
@@ -1820,7 +1805,7 @@ async fn persist_mission_history_and_schedule_metadata_refresh(
         tracing::warn!("Failed to persist mission history: {}", e);
         return;
     }
-    schedule_mission_metadata_refresh(mission_store, events_tx, mission_id, false);
+    schedule_mission_metadata_refresh(mission_store, events_tx, mission_id, false).await;
 }
 
 async fn refresh_mission_metadata_from_store(
@@ -1863,7 +1848,7 @@ async fn refresh_mission_metadata_from_store(
         &mission,
         conversational_count,
         force_refresh,
-    );
+    ).await;
 
     let (generated_title, generated_short_description) = generate_mission_metadata_updates(
         mission_store,
@@ -1897,20 +1882,18 @@ async fn refresh_mission_metadata_from_store(
     )
     .await;
     if should_refresh || metadata_updated {
-        record_metadata_refresh_baseline(mission_id, conversational_count);
+        record_metadata_refresh_baseline(mission_id, conversational_count).await;
     }
 }
 
-fn schedule_mission_metadata_refresh(
+async fn schedule_mission_metadata_refresh(
     mission_store: &Arc<dyn MissionStore>,
     events_tx: &broadcast::Sender<AgentEvent>,
     mission_id: Uuid,
     force_refresh: bool,
 ) {
     {
-        let mut tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
         if should_skip_metadata_refresh_schedule(&mut tasks, mission_id, force_refresh) {
             return;
         }
@@ -1922,15 +1905,11 @@ fn schedule_mission_metadata_refresh(
     let background_refresh = tokio::spawn(async move {
         refresh_mission_metadata_from_store(&mission_store, &events_tx, mission_id, force_refresh)
             .await;
-        let mut tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
         complete_metadata_refresh_task(&mut tasks, mission_id, task_id);
     });
     let registration = {
-        let mut tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
         register_metadata_refresh_task(
             &mut tasks,
             mission_id,
@@ -1952,15 +1931,13 @@ async fn refresh_mission_metadata_for_milestone(
     refresh_mission_metadata_from_store(mission_store, events_tx, mission_id, true).await;
 }
 
-fn schedule_mission_metadata_refresh_for_milestone(
+async fn schedule_mission_metadata_refresh_for_milestone(
     mission_store: &Arc<dyn MissionStore>,
     events_tx: &broadcast::Sender<AgentEvent>,
     mission_id: Uuid,
 ) {
     {
-        let mut tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
         if should_skip_metadata_refresh_schedule(&mut tasks, mission_id, true) {
             return;
         }
@@ -1971,15 +1948,11 @@ fn schedule_mission_metadata_refresh_for_milestone(
     let events_tx = events_tx.clone();
     let background_refresh = tokio::spawn(async move {
         refresh_mission_metadata_for_milestone(&mission_store, &events_tx, mission_id).await;
-        let mut tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
         complete_metadata_refresh_task(&mut tasks, mission_id, task_id);
     });
     let registration = {
-        let mut tasks = MISSION_METADATA_REFRESH_TASKS
-            .lock()
-            .expect("metadata refresh task registry lock poisoned");
+        let mut tasks = MISSION_METADATA_REFRESH_TASKS.lock().await;
         register_metadata_refresh_task(&mut tasks, mission_id, true, task_id, background_refresh)
     };
     if let Some(superseded) = registration.superseded {
@@ -1991,14 +1964,14 @@ fn status_requires_metadata_milestone_refresh(status: MissionStatus) -> bool {
     !matches!(status, MissionStatus::Pending | MissionStatus::Active)
 }
 
-fn maybe_schedule_mission_metadata_refresh_for_status(
+async fn maybe_schedule_mission_metadata_refresh_for_status(
     mission_store: &Arc<dyn MissionStore>,
     events_tx: &broadcast::Sender<AgentEvent>,
     mission_id: Uuid,
     status: MissionStatus,
 ) {
     if status_requires_metadata_milestone_refresh(status) {
-        schedule_mission_metadata_refresh_for_milestone(mission_store, events_tx, mission_id);
+        schedule_mission_metadata_refresh_for_milestone(mission_store, events_tx, mission_id).await;
     }
 }
 
@@ -2016,6 +1989,42 @@ fn recv_failed<T>(_: T) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR,
         "Failed to receive response".to_string(),
     )
+}
+
+async fn resolve_workspace_relative_path(
+    workspace_root: &StdPath,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let candidate = StdPath::new(relative_path);
+    if candidate.as_os_str().is_empty() {
+        return Err("path is required".to_string());
+    }
+    if candidate.is_absolute() {
+        return Err("absolute paths are not allowed".to_string());
+    }
+    if candidate.components().any(|component| {
+        matches!(
+            component,
+            Component::Prefix(_) | Component::RootDir | Component::ParentDir
+        )
+    }) {
+        return Err("path must be a workspace-relative path".to_string());
+    }
+
+    // Canonicalize both sides so symlinks can't escape the workspace root.
+    let root = tokio::fs::canonicalize(workspace_root)
+        .await
+        .map_err(|e| format!("Failed to resolve workspace root: {}", e))?;
+    let joined = workspace_root.join(candidate);
+    let resolved = tokio::fs::canonicalize(&joined)
+        .await
+        .map_err(|e| format!("Failed to resolve path '{}': {}", joined.display(), e))?;
+
+    if !resolved.starts_with(&root) {
+        return Err("path must stay within workspace root".to_string());
+    }
+
+    Ok(resolved)
 }
 
 /// Shorthand for a `{ "ok": true }` JSON response.
@@ -2840,7 +2849,7 @@ pub enum ControlCommand {
         model_override: Option<String>,
         /// Optional model effort override (e.g. low/medium/high)
         model_effort: Option<String>,
-        /// Backend to use for this mission ("opencode" or "claudecode")
+        /// Backend ID to use for this mission (e.g. "claudecode", "codex", "gemini").
         backend: Option<String>,
         /// Config profile to use for this mission
         config_profile: Option<String>,
@@ -3078,7 +3087,7 @@ pub struct ControlState {
 pub struct ControlHub {
     sessions: Arc<RwLock<HashMap<String, ControlState>>>,
     config: Config,
-    root_agent: AgentRef,
+    backend_registry: Arc<RwLock<BackendRegistry>>,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,
@@ -3090,7 +3099,7 @@ impl ControlHub {
     pub fn new(
         config: Config,
         ai_providers: SharedAIProviderStore,
-        root_agent: AgentRef,
+        backend_registry: Arc<RwLock<BackendRegistry>>,
         mcp: Arc<McpRegistry>,
         workspaces: workspace::SharedWorkspaceStore,
         library: SharedLibrary,
@@ -3100,7 +3109,7 @@ impl ControlHub {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             config,
             ai_providers,
-            root_agent,
+            backend_registry,
             mcp,
             workspaces,
             library,
@@ -3143,7 +3152,7 @@ impl ControlHub {
         let state = spawn_control_session(
             self.config.clone(),
             self.ai_providers.clone(),
-            Arc::clone(&self.root_agent),
+            Arc::clone(&self.backend_registry),
             Arc::clone(&self.mcp),
             Arc::clone(&self.workspaces),
             Arc::clone(&self.library),
@@ -3801,7 +3810,7 @@ pub struct CreateMissionRequest {
     pub model_effort: Option<String>,
     /// Config profile to use for this mission (overrides workspace's default profile)
     pub config_profile: Option<String>,
-    /// Backend to use for this mission ("opencode" or "claudecode")
+    /// Backend ID to use for this mission (e.g. "claudecode", "codex", "gemini").
     pub backend: Option<String>,
     /// Parent mission ID (for orchestrated worker missions)
     pub parent_mission_id: Option<Uuid>,
@@ -3897,7 +3906,7 @@ pub async fn create_mission(
     }
 
     // Normalize model override based on backend expectations.
-    // OpenCode expects provider/model; Claude Code and Codex expect raw model IDs.
+    // Some backends accept provider/model; others accept raw model IDs.
     if let Some(ref raw_model) = model_override {
         model_override = normalize_model_override_for_backend(backend.as_deref(), raw_model);
     }
@@ -3930,7 +3939,7 @@ pub async fn create_mission(
                         "Invalid agent '{}': this is a provider account ({}). Select a real agent for the '{}' backend (e.g. build/explore/general/plan), and configure providers under Settings → Providers.",
                         agent_id,
                         provider.provider_type.display_name(),
-                        backend.as_deref().unwrap_or("opencode")
+                        backend.as_deref().unwrap_or("default")
                     ),
                 ));
             }
@@ -3939,7 +3948,7 @@ pub async fn create_mission(
         let mut is_valid = false;
 
         if !is_valid {
-            let backend_id = backend.as_deref().unwrap_or("opencode");
+            let backend_id = backend.as_deref().unwrap_or("default");
             let registry = state.backend_registry.read().await;
             if let Some(backend_impl) = registry.get(backend_id) {
                 // 2. Check if it's a native agent for this backend
@@ -4230,8 +4239,12 @@ pub struct OpenCodeDiagnostics {
     pub base_url: String,
     /// Current session ID (if active)
     pub session_id: Option<String>,
-    /// Session status from OpenCode
-    pub session_status: Option<crate::opencode::OpenCodeSessionStatus>,
+    /// Execution mode for the orchestrator (there is no central OpenCode server anymore).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<String>,
+    /// Default backend ID used when missions do not specify one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_backend: Option<String>,
     /// Error message if status check failed
     pub error: Option<String>,
 }
@@ -4240,14 +4253,20 @@ pub struct OpenCodeDiagnostics {
 /// Note: With per-mission CLI execution, there's no central server to diagnose.
 /// This endpoint now returns information about the execution mode.
 pub async fn get_opencode_diagnostics(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Extension(_user): Extension<AuthUser>,
 ) -> Result<Json<OpenCodeDiagnostics>, (StatusCode, String)> {
+    let default_backend = {
+        let registry = state.backend_registry.read().await;
+        registry.default_id().to_string()
+    };
+
     // Per-mission CLI execution doesn't use a central server
     Ok(Json(OpenCodeDiagnostics {
         base_url: "per-mission-cli-mode".to_string(),
         session_id: None,
-        session_status: None,
+        execution_mode: Some("per-mission-cli".to_string()),
+        default_backend: Some(default_backend),
         error: Some(
             "Per-mission CLI mode: No central server. Each mission spawns its own CLI process."
                 .to_string(),
@@ -4405,7 +4424,7 @@ pub async fn delete_mission(
         .map_err(internal_error)?;
 
     if deleted {
-        clear_mission_metadata_refresh_state(mission_id);
+        clear_mission_metadata_refresh_state(mission_id).await;
         Ok(Json(serde_json::json!({
             "ok": true,
             "deleted": mission_id
@@ -4583,7 +4602,7 @@ pub async fn stream(
 fn spawn_control_session(
     config: Config,
     ai_providers: SharedAIProviderStore,
-    root_agent: AgentRef,
+    backend_registry: Arc<RwLock<BackendRegistry>>,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,
@@ -4630,7 +4649,7 @@ fn spawn_control_session(
     tokio::spawn(control_actor_loop(
         config.clone(),
         state.ai_providers.clone(),
-        root_agent,
+        backend_registry,
         mcp,
         workspaces.clone(),
         library.clone(),
@@ -4683,7 +4702,7 @@ fn spawn_control_session(
                                 &tx,
                                 mission.id,
                                 MissionStatus::Interrupted,
-                            );
+                            ).await;
                             let _ = tx.send(AgentEvent::MissionStatusChanged {
                                 mission_id: mission.id,
                                 status: MissionStatus::Interrupted,
@@ -4806,7 +4825,8 @@ async fn cleanup_stale_active_missions_once(
                         events_tx,
                         mission.id,
                         MissionStatus::Completed,
-                    );
+                    )
+                    .await;
                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                         mission_id: mission.id,
                         status: MissionStatus::Completed,
@@ -5020,15 +5040,25 @@ async fn automation_scheduler_loop(
                 }
                 CommandSource::LocalFile { path } => {
                     // Read file from mission workspace
-                    let file_path = if let Some(ws) = workspace.as_ref() {
-                        ws.path.join(path)
-                    } else {
+                    let Some(ws) = workspace.as_ref() else {
                         tracing::warn!(
                             "Workspace {} not found for automation {}",
                             mission.workspace_id,
                             automation.id
                         );
                         continue;
+                    };
+                    let file_path = match resolve_workspace_relative_path(&ws.path, path).await {
+                        Ok(path) => path,
+                        Err(err) => {
+                            tracing::warn!(
+                                "Invalid local file path '{}' for automation {}: {}",
+                                path,
+                                automation.id,
+                                err
+                            );
+                            continue;
+                        }
                     };
 
                     match tokio::fs::read_to_string(&file_path).await {
@@ -5239,7 +5269,8 @@ async fn resolve_automation_command(
         }
         CommandSource::LocalFile { path } => {
             let ws = workspace.as_ref()?;
-            tokio::fs::read_to_string(ws.path.join(path)).await.ok()?
+            let file_path = resolve_workspace_relative_path(&ws.path, path).await.ok()?;
+            tokio::fs::read_to_string(file_path).await.ok()?
         }
         CommandSource::Inline { content } => content.clone(),
     };
@@ -5422,7 +5453,8 @@ async fn maybe_finalize_terminal_mission(
                     events_tx,
                     mission_id,
                     new_status,
-                );
+                )
+                .await;
                 let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                     mission_id,
                     status: new_status,
@@ -5593,15 +5625,25 @@ async fn agent_finished_automation_messages(
                 }
             }
             CommandSource::LocalFile { path } => {
-                let file_path = if let Some(ws) = workspace.as_ref() {
-                    ws.path.join(path)
-                } else {
+                let Some(ws) = workspace.as_ref() else {
                     tracing::warn!(
                         "Workspace {} not found for automation {}",
                         mission.workspace_id,
                         automation.id
                     );
                     continue;
+                };
+                let file_path = match resolve_workspace_relative_path(&ws.path, path).await {
+                    Ok(path) => path,
+                    Err(err) => {
+                        tracing::warn!(
+                            "Invalid local file path '{}' for agent_finished automation {}: {}",
+                            path,
+                            automation.id,
+                            err
+                        );
+                        continue;
+                    }
                 };
                 match tokio::fs::read_to_string(&file_path).await {
                     Ok(content) => content,
@@ -5697,7 +5739,7 @@ async fn agent_finished_automation_messages(
 async fn control_actor_loop(
     config: Config,
     ai_providers: SharedAIProviderStore,
-    root_agent: AgentRef,
+    backend_registry: Arc<RwLock<BackendRegistry>>,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,
@@ -6097,7 +6139,7 @@ async fn control_actor_loop(
                                         runner.start_next(
                                             ai_providers.clone(),
                                             config.clone(),
-                                            Arc::clone(&root_agent),
+                                            Arc::clone(&backend_registry),
                                             Arc::clone(&mcp),
                                             Arc::clone(&workspaces),
                                             library.clone(),
@@ -6194,7 +6236,7 @@ async fn control_actor_loop(
                                             runner.start_next(
                                                 ai_providers.clone(),
                                                 config.clone(),
-                                                Arc::clone(&root_agent),
+                                                Arc::clone(&backend_registry),
                                                 Arc::clone(&mcp),
                                                 Arc::clone(&workspaces),
                                                 library.clone(),
@@ -6417,7 +6459,7 @@ async fn control_actor_loop(
                                     .await;
 
                                 let _cfg = config.clone();
-                                let agent = Arc::clone(&root_agent);
+                                let backend_registry_ref = Arc::clone(&backend_registry);
                                 let mcp_ref = Arc::clone(&mcp);
                                 let workspaces_ref = Arc::clone(&workspaces);
                                 let library_ref = Arc::clone(&library);
@@ -6505,7 +6547,7 @@ async fn control_actor_loop(
                                     let result = run_single_control_turn(
                                         providers,
                                         config_copy,
-                                        agent,
+                                        backend_registry_ref,
                                         mcp_ref,
                                         workspaces_ref,
                                         library_ref,
@@ -6671,7 +6713,8 @@ async fn control_actor_loop(
                                 &events_tx,
                                 id,
                                 new_status,
-                            );
+                            )
+                            .await;
                             let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                 mission_id: id,
                                 status: new_status,
@@ -6689,7 +6732,7 @@ async fn control_actor_loop(
                             });
                             match mission_store.get_mission(id).await {
                                 Ok(Some(updated)) => {
-                                    record_metadata_refresh_baseline_from_mission(id, &updated);
+                                    record_metadata_refresh_baseline_from_mission(id, &updated).await;
                                     emit_mission_metadata_updated_event(&events_tx, id, &updated);
                                 }
                                 Ok(None) => {
@@ -6760,7 +6803,7 @@ async fn control_actor_loop(
                             let started = runner.start_next(
                                 ai_providers.clone(),
                                 config.clone(),
-                                Arc::clone(&root_agent),
+                                Arc::clone(&backend_registry),
                                 Arc::clone(&mcp),
                                 Arc::clone(&workspaces),
                                 library.clone(),
@@ -6846,7 +6889,8 @@ async fn control_actor_loop(
                                     &events_tx,
                                     mission_id,
                                     MissionStatus::Interrupted,
-                                );
+                                )
+                                .await;
                             }
                             let _ = events_tx.send(AgentEvent::Error {
                                 message: format!("Parallel mission {} cancelled", mission_id),
@@ -6984,7 +7028,8 @@ async fn control_actor_loop(
                                         &events_tx,
                                         mission_id,
                                         MissionStatus::Active,
-                                    );
+                                    )
+                                    .await;
                                     // Send status changed event so UI updates
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                         mission_id,
@@ -7013,7 +7058,7 @@ async fn control_actor_loop(
                                         ).await;
                                         let _ = events_tx.send(AgentEvent::UserMessage { id: mid, content: msg.clone(), queued: false, mission_id: Some(target_mid) });
                                         let cfg = config.clone();
-                                        let agent = Arc::clone(&root_agent);
+                                        let agent_registry = Arc::clone(&backend_registry);
                                         let mcp_ref = Arc::clone(&mcp);
                                         let workspaces_ref = Arc::clone(&workspaces);
                                         let library_ref = Arc::clone(&library);
@@ -7048,7 +7093,7 @@ async fn control_actor_loop(
                                             let result = run_single_control_turn(
                                                 providers,
                                                 cfg,
-                                                agent,
+                                                agent_registry,
                                                 mcp_ref,
                                                 workspaces_ref,
                                                 library_ref,
@@ -7127,7 +7172,8 @@ async fn control_actor_loop(
                                         &events_tx,
                                         mission_id,
                                         MissionStatus::Interrupted,
-                                    );
+                                    )
+                                    .await;
                                     interrupted_ids.push(mission_id);
                                     tracing::info!("Marked mission {} as interrupted", mission_id);
                                 }
@@ -7167,7 +7213,8 @@ async fn control_actor_loop(
                                     &events_tx,
                                     *mission_id,
                                     MissionStatus::Interrupted,
-                                );
+                                )
+                                .await;
                                 interrupted_ids.push(*mission_id);
                                 tracing::info!("Marked parallel mission {} as interrupted", mission_id);
                             }
@@ -7304,7 +7351,8 @@ async fn control_actor_loop(
                                     &events_tx,
                                     id,
                                     new_status,
-                                );
+                                )
+                                .await;
                                 // Generate and store mission summary
                                 if let Some(ref summary_text) = summary {
                                     // Extract key files from conversation (look for paths in assistant messages)
@@ -7389,7 +7437,8 @@ async fn control_actor_loop(
                                                 &events_tx,
                                                 mid,
                                                 false,
-                                            );
+                                            )
+                                            .await;
                                         }
                                     }
                                     Ok(None) => {
@@ -7554,7 +7603,8 @@ async fn control_actor_loop(
                                         &events_tx,
                                         mission_id,
                                         MissionStatus::Failed,
-                                    );
+                                    )
+                                    .await;
                                     let _ = events_tx.send(AgentEvent::MissionStatusChanged {
                                         mission_id,
                                         status: MissionStatus::Failed,
@@ -7625,7 +7675,7 @@ async fn control_actor_loop(
                         .await;
 
                     let _cfg = config.clone();
-                    let agent = Arc::clone(&root_agent);
+                    let agent_registry = Arc::clone(&backend_registry);
                     let mcp_ref = Arc::clone(&mcp);
                     let workspaces_ref = Arc::clone(&workspaces);
                     let library_ref = Arc::clone(&library);
@@ -7687,7 +7737,7 @@ async fn control_actor_loop(
                         let result = run_single_control_turn(
                             providers,
                             config_copy,
-                            agent,
+                            agent_registry,
                             mcp_ref,
                             workspaces_ref,
                             library_ref,
@@ -7700,13 +7750,13 @@ async fn control_actor_loop(
                             Some(mission_ctrl),
                             tree_ref,
                             progress_ref,
-                            workspace_id,
                             mission_id,
+                            workspace_id,
+                            backend_id,
                             model_override,
                             model_effort,
                             agent_override,
                             session_id,
-                            backend_id,
                             false, // force_session_resume: continuation turn, not a resume
                             mission_config_profile,
                         )
@@ -7874,7 +7924,7 @@ async fn control_actor_loop(
                                 let started = runner.start_next(
                                     ai_providers.clone(),
                                     config.clone(),
-                                    Arc::clone(&root_agent),
+                                    Arc::clone(&backend_registry),
                                     Arc::clone(&mcp),
                                     Arc::clone(&workspaces),
                                     library.clone(),
@@ -8271,7 +8321,7 @@ async fn control_actor_loop(
 async fn run_single_control_turn(
     _ai_providers: SharedAIProviderStore,
     mut config: Config,
-    _root_agent: AgentRef,
+    backend_registry: Arc<RwLock<BackendRegistry>>,
     mcp: Arc<McpRegistry>,
     workspaces: workspace::SharedWorkspaceStore,
     library: SharedLibrary,
@@ -8294,7 +8344,17 @@ async fn run_single_control_turn(
     force_session_resume: bool,
     mission_config_profile: Option<String>,
 ) -> crate::agents::AgentResult {
-    let is_claudecode = backend_id.as_deref() == Some("claudecode");
+    let default_backend_id = {
+        let registry = backend_registry.read().await;
+        registry.default_id().to_string()
+    };
+    let effective_backend_id = backend_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_backend_id.as_str());
+    let is_claudecode = effective_backend_id == "claudecode";
+
     // Get config profile: mission's config_profile takes priority over workspace's
     let workspace_config_profile = if let Some(ws_id) = workspace_id {
         workspaces.get(ws_id).await.and_then(|ws| ws.config_profile)
@@ -8306,19 +8366,19 @@ async fn run_single_control_turn(
     let requested_model_effort = model_effort;
     if let Some(ref model) = requested_model {
         config.default_model = Some(model.clone());
-    } else if is_claudecode && config.default_model.is_none() {
+    } else if effective_config_profile.is_some() {
+        // If a config profile is selected and the request did not override the model, prefer the
+        // profile/backend defaults over any global config default.
+        config.default_model = None;
+    }
+
+    if is_claudecode && config.default_model.is_none() {
         if let Some(default_model) =
             resolve_claudecode_default_model(&library, effective_config_profile.as_deref()).await
         {
             config.default_model = Some(default_model);
         }
-    } else if (backend_id.as_deref() == Some("opencode")
-        && effective_config_profile.is_some()
-        && requested_model.is_none())
-        || (backend_id.as_deref() == Some("codex") && requested_model.is_none())
-    {
-        config.default_model = None;
-    } else if backend_id.as_deref() == Some("gemini") && requested_model.is_none() {
+    } else if effective_backend_id == "gemini" && requested_model.is_none() {
         config.default_model = Some(resolve_gemini_default_model());
     }
     if let Some(ref agent) = agent_override {
@@ -8344,7 +8404,7 @@ async fn run_single_control_turn(
             &mcp,
             lib_ref,
             mid,
-            backend_id.as_deref().unwrap_or("opencode"),
+            effective_backend_id,
             None, // custom_providers: TODO integrate with provider store
             effective_config_profile.as_deref(),
         ))
@@ -8417,10 +8477,8 @@ async fn run_single_control_turn(
     let fallback_workspace = workspace::Workspace::default_host(config.working_dir.clone());
     let exec_workspace = runtime_workspace.as_ref().unwrap_or(&fallback_workspace);
 
-    let effective_backend = Cow::Borrowed(backend_id.as_deref().unwrap_or("claudecode").trim());
-
     // Execute based on resolved backend
-    let result = match effective_backend.as_ref().trim() {
+    let result = match effective_backend_id {
         "claudecode" => {
             let mid = match require_mission_id(mission_id, "Claude Code", &events_tx) {
                 Ok(id) => id,
@@ -8662,17 +8720,7 @@ async fn run_single_control_turn(
             ))
             .await
         }
-        backend if backend != "opencode" => {
-            let _ = events_tx.send(AgentEvent::Error {
-                message: format!("Unsupported backend: {}", backend),
-                mission_id,
-                resumable: mission_id.is_some(),
-            });
-            crate::agents::AgentResult::failure(format!("Unsupported backend: {}", backend), 0)
-                .with_terminal_reason(TerminalReason::LlmError)
-        }
-        _ => {
-            // Default to opencode using per-workspace CLI execution
+        "opencode" => {
             let mid = mission_id.unwrap_or_else(Uuid::nil);
             Box::pin(super::mission_runner::run_opencode_turn(
                 exec_workspace,
@@ -8687,6 +8735,15 @@ async fn run_single_control_turn(
                 &config.working_dir,
             ))
             .await
+        }
+        backend => {
+            let _ = events_tx.send(AgentEvent::Error {
+                message: format!("Unsupported backend: {}", backend),
+                mission_id,
+                resumable: mission_id.is_some(),
+            });
+            crate::agents::AgentResult::failure(format!("Unsupported backend: {}", backend), 0)
+                .with_terminal_reason(TerminalReason::LlmError)
         }
     };
     result
@@ -9109,8 +9166,11 @@ pub async fn webhook_receiver(
             .await
         {
             Ok(Some(automation)) => {
-                found = Some((automation, session.clone()));
-                break;
+                if automation.mission_id == mission_id {
+                    found = Some((automation, session.clone()));
+                    break;
+                }
+                continue;
             }
             Ok(None) => continue,
             Err(e) => {
@@ -9124,17 +9184,6 @@ pub async fn webhook_receiver(
         StatusCode::NOT_FOUND,
         format!("Webhook {} not found", webhook_id),
     ))?;
-
-    // Verify mission_id matches
-    if automation.mission_id != mission_id {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Webhook {} does not belong to mission {}",
-                webhook_id, mission_id
-            ),
-        ));
-    }
 
     // Check if automation is active
     if !automation.active {
@@ -9259,14 +9308,17 @@ pub async fn webhook_receiver(
         }
         CommandSource::LocalFile { path } => {
             // Read file from mission workspace
-            let file_path = if let Some(ws) = workspace.as_ref() {
-                ws.path.join(path)
-            } else {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Workspace {} not found", mission.workspace_id),
-                ));
-            };
+            let ws = workspace.as_ref().ok_or((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Workspace {} not found", mission.workspace_id),
+            ))?;
+            let file_path =
+                resolve_workspace_relative_path(&ws.path, path).await.map_err(|err| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid local file path '{}': {}", path, err),
+                    )
+                })?;
 
             match tokio::fs::read_to_string(&file_path).await {
                 Ok(content) => content,
@@ -9372,7 +9424,8 @@ pub async fn webhook_receiver(
 
     let cmd_tx = control.cmd_tx.clone();
     let mission_store = control.mission_store.clone();
-    drop(control); // Release the lock before sending
+    // Drop control handle before sending to avoid unnecessary cloning/retention
+    drop(control);
 
     let send_result = cmd_tx
         .send(ControlCommand::UserMessage {
@@ -10709,7 +10762,7 @@ And the report:
             .expect("seed history");
 
         let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
-        schedule_mission_metadata_refresh_for_milestone(&store, &events_tx, mission.id);
+        schedule_mission_metadata_refresh_for_milestone(&store, &events_tx, mission.id).await;
 
         let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -10791,7 +10844,7 @@ And the report:
             &events_tx,
             mission.id,
             MissionStatus::Completed,
-        );
+        ).await;
 
         let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -10956,7 +11009,7 @@ And the report:
             .expect("seed history");
 
         let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
-        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false).await;
 
         let saw_metadata_event = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             loop {
@@ -11106,7 +11159,7 @@ And the report:
             .expect("seed history");
 
         let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
-        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false).await;
 
         let saw_metadata_event =
             tokio::time::timeout(std::time::Duration::from_millis(300), async {
@@ -11223,7 +11276,7 @@ And the report:
             .expect("seed history");
 
         let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
-        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false).await;
 
         let saw_metadata_event =
             tokio::time::timeout(std::time::Duration::from_millis(300), async {
@@ -11309,7 +11362,7 @@ And the report:
             .expect("update history");
 
         let (events_tx, mut events_rx) = broadcast::channel::<AgentEvent>(16);
-        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false);
+        schedule_mission_metadata_refresh(&store, &events_tx, mission.id, false).await;
 
         let saw_metadata_event =
             tokio::time::timeout(std::time::Duration::from_millis(300), async {
